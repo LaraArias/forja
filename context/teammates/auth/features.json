@@ -5,32 +5,32 @@
       "description": "POST /auth/register crea usuario con email y password hasheado con bcrypt, retorna 201",
       "passes": true,
       "created_at": "2026-02-14T00:00:00Z",
-      "passed_at": "2026-02-14T23:12:55.708902+00:00",
-      "cycles": 1
+      "passed_at": "2026-02-14T23:14:12.914137+00:00",
+      "cycles": 2
     },
     {
       "id": "auth-002",
       "description": "POST /auth/login con credenciales válidas retorna JWT token en campo 'access_token'",
       "passes": true,
       "created_at": "2026-02-14T00:00:00Z",
-      "passed_at": "2026-02-14T23:12:56.791532+00:00",
-      "cycles": 1
+      "passed_at": "2026-02-14T23:14:12.971167+00:00",
+      "cycles": 2
     },
     {
       "id": "auth-003",
       "description": "Middleware verifica Bearer token en header Authorization; retorna 401 si falta o es inválido",
       "passes": true,
       "created_at": "2026-02-14T00:00:00Z",
-      "passed_at": "2026-02-14T23:12:57.693219+00:00",
-      "cycles": 1
+      "passed_at": "2026-02-14T23:14:13.029730+00:00",
+      "cycles": 2
     },
     {
       "id": "auth-004",
       "description": "POST /auth/register con email duplicado retorna 400 con mensaje de error",
       "passes": true,
       "created_at": "2026-02-14T00:00:00Z",
-      "passed_at": "2026-02-14T23:12:58.761854+00:00",
-      "cycles": 1
+      "passed_at": "2026-02-14T23:14:13.077897+00:00",
+      "cycles": 2
     }
   ]
 }
