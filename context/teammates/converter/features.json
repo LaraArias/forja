@@ -19,10 +19,10 @@
     {
       "id": "converter-003",
       "description": "convert_md_to_html() convierte links [text](url) a <a href='url'>text</a>",
-      "passes": false,
+      "passes": true,
       "created_at": "2026-02-14T00:00:00Z",
-      "passed_at": null,
-      "cycles": 0
+      "passed_at": "2026-02-14T22:57:05.866979+00:00",
+      "cycles": 1
     },
     {
       "id": "converter-004",
