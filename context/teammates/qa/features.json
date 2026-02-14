@@ -1,0 +1,12 @@
+{
+  "features": [
+    {
+      "id": "qa-001",
+      "description": "Todos los comandos del CLI funcionan: stdout output, file output con -o, y error en archivo inexistente",
+      "passes": true,
+      "created_at": "2026-02-14T00:00:00Z",
+      "passed_at": "2026-02-14T23:00:44.192505+00:00",
+      "cycles": 2
+    }
+  ]
+}
