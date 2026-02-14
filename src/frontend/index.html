@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Manager</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Auth Section -->
+        <div id="auth-section">
+            <h1>Task Manager</h1>
+            <div id="auth-forms">
+                <div id="login-form">
+                    <h2>Login</h2>
+                    <input type="email" id="login-email" placeholder="Email">
+                    <input type="password" id="login-password" placeholder="Password">
+                    <button onclick="login()">Login</button>
+                    <p>No account? <a href="#" onclick="showRegister()">Register</a></p>
+                </div>
+                <div id="register-form" style="display:none">
+                    <h2>Register</h2>
+                    <input type="email" id="reg-email" placeholder="Email">
+                    <input type="password" id="reg-password" placeholder="Password">
+                    <button onclick="register()">Register</button>
+                    <p>Have an account? <a href="#" onclick="showLogin()">Login</a></p>
+                </div>
+                <p id="auth-error" class="error"></p>
+            </div>
+        </div>
+
+        <!-- Dashboard Section -->
+        <div id="dashboard-section" style="display:none">
+            <header>
+                <h1>My Tasks</h1>
+                <button onclick="logout()">Logout</button>
+            </header>
+
+            <!-- Create Task -->
+            <div id="create-task">
+                <input type="text" id="task-title" placeholder="Task title">
+                <input type="text" id="task-desc" placeholder="Description">
+                <button onclick="createTask()">Add Task</button>
+            </div>
+
+            <!-- Filters -->
+            <div id="filters">
+                <button class="filter-btn active" onclick="filterTasks('all')">All</button>
+                <button class="filter-btn" onclick="filterTasks('pending')">Pending</button>
+                <button class="filter-btn" onclick="filterTasks('in_progress')">In Progress</button>
+                <button class="filter-btn" onclick="filterTasks('done')">Done</button>
+            </div>
+
+            <!-- Task List -->
+            <div id="task-list"></div>
+
+            <!-- Edit Modal -->
+            <div id="edit-modal" style="display:none">
+                <div class="modal-content">
+                    <h3>Edit Task</h3>
+                    <input type="hidden" id="edit-id">
+                    <input type="text" id="edit-title" placeholder="Title">
+                    <input type="text" id="edit-desc" placeholder="Description">
+                    <select id="edit-status">
+                        <option value="pending">Pending</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="done">Done</option>
+                    </select>
+                    <div class="modal-actions">
+                        <button onclick="saveEdit()">Save</button>
+                        <button onclick="closeModal()">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
