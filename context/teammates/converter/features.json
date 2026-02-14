@@ -27,10 +27,10 @@
     {
       "id": "converter-004",
       "description": "convert_md_to_html() convierte code blocks (```) a <code> y listas (- item) a <ul><li>",
-      "passes": false,
+      "passes": true,
       "created_at": "2026-02-14T00:00:00Z",
-      "passed_at": null,
-      "cycles": 0
+      "passed_at": "2026-02-14T22:57:11.353191+00:00",
+      "cycles": 1
     }
   ]
 }
