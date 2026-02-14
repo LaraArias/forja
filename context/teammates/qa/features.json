@@ -2,11 +2,11 @@
   "features": [
     {
       "id": "qa-001",
-      "description": "Todos los comandos del CLI funcionan: stdout output, file output con -o, y error en archivo inexistente",
+      "description": "Flujo completo: register usuario, login, crear tarea, listar tareas, actualizar tarea, filtrar por status, eliminar tarea — todo via curl contra la API",
       "passes": true,
       "created_at": "2026-02-14T00:00:00Z",
-      "passed_at": "2026-02-14T23:00:44.192505+00:00",
-      "cycles": 2
+      "passed_at": "2026-02-14T23:18:48.757184+00:00",
+      "cycles": 1
     }
   ]
 }
