@@ -1,0 +1,46 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(echo:*)",
+      "Bash(pip3 install:*)",
+      "Bash(claude --dangerously-skip-permissions -p \"Read CLAUDE.md and execute Forja with the PRD in context/prd.md\")",
+      "Bash(curl:*)",
+      "Bash(kill:*)",
+      "Bash(pgrep:*)",
+      "Bash(pkill:*)",
+      "Bash(for id in api-001 api-002 api-003 api-004 api-005)",
+      "Bash(do python3 .forja-tools/forja_features.py attempt $id --dir context/teammates/api/)",
+      "Bash(done)",
+      "Bash(for id in frontend-001 frontend-002 frontend-003 frontend-004)",
+      "Bash(do python3 .forja-tools/forja_features.py attempt $id --dir context/teammates/frontend/)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .forja-tools/forja_hook_filter.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .forja/backups && cp -r context/ .forja/backups/pre-compact-$(date +%s)/ 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

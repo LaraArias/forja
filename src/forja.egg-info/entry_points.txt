@@ -1,0 +1,2 @@
+[console_scripts]
+forja = forja.cli:main

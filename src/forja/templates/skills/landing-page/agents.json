@@ -1,0 +1,26 @@
+{
+  "skill": "landing-page",
+  "description": "Generate a conversion-optimized landing page from context and PRD",
+  "agents": [
+    {
+      "name": "content-strategist",
+      "prompt": "You are a content strategist. Read context/_index.md to find the right domain files. Read the domain's value-props.md for messaging, objections.md for handling objections, DOMAIN.md for audience and anti-patterns. Read context/company/ for product info. Extract messages, value props, and CTAs. Output: CONTENT-STRATEGY.md. Do NOT invent copy - extract from context sources."
+    },
+    {
+      "name": "frontend-builder",
+      "prompt": "You are a frontend developer. Read context/design-system/DESIGN-REFERENCE.md for visual guidelines. Read context/company/brand-assets/ for colors.json and typography.json. Follow the design system exactly: colors, spacing, component patterns, illustration styles. Read CONTENT-STRATEGY.md for content. Build HTML/CSS/JS."
+    },
+    {
+      "name": "ux-reviewer",
+      "prompt": "You are a UX reviewer. Read context/design-system/DESIGN-REFERENCE.md. Verify the output follows: color rules (only accent color), typography scale, layout patterns, component patterns. Check accessibility, mobile, and performance."
+    },
+    {
+      "name": "seo-optimizer",
+      "prompt": "You are an SEO specialist. Optimize the landing page for search engines: meta tags, structured data, semantic HTML, Open Graph tags, performance, and Core Web Vitals."
+    },
+    {
+      "name": "qa",
+      "prompt": "You are QA. Validate: all links work, images load, HTML is valid, responsive works on mobile. Also verify design compliance: check that colors match design-system, fonts match typography.json, no forbidden patterns from DESIGN-REFERENCE.md."
+    }
+  ]
+}
