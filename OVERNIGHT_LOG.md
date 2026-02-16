@@ -38,25 +38,42 @@
 
 **Root cause:** ~49 bare `except: pass` blocks across the codebase swallowed errors with no logging, making debugging impossible.
 
-**Fix:** Added `import logging` and `logger = logging.getLogger("forja")` to affected modules. Changed all `except: pass` to `except Exception as exc: logger.debug(...)` or `logger.warning(...)`.
+**Fix:** Two categories:
+- **Package files** (have `logging` module): Changed to `logger.debug(...)` or `logger.warning(...)`
+- **Template files** (standalone, no `logging`): Changed to `print(f"  ...: {exc}", file=sys.stderr)`
 
-**Files changed:**
+**Files changed (package):**
 - `src/forja/config_loader.py` - 2 blocks: `_parse_value()` ValueError, `_apply_env_overrides()` ValueError
 - `src/forja/planner.py` - 2 blocks: `_detect_skill()` file read, `_gather_context()` learnings read
 - `src/forja/runner.py` - 8 blocks: JSON parse, context read, process kill, PID cleanup, auto-block, npm setup, coverage parse, SIGKILL
 - `src/forja/utils.py` - 1 block: `gather_context()` file read
 
+**Files changed (templates - print to stderr):**
+- `src/forja/templates/forja_utils.py` - 3 blocks: HTTP error body reading
+- `src/forja/templates/forja_learnings.py` - 7 blocks: JSONL reading, artifact extraction
+- `src/forja/templates/forja_observatory.py` - ~8 blocks: data reading, browser open, PID cleanup
+- `src/forja/templates/forja_hardening.py` - 3 blocks: process kill, spec reading
+- `src/forja/templates/forja_outcome.py` - 2 blocks: feature/spec reading
+- `src/forja/templates/forja_specreview.py` - 3 blocks: store/learnings reading
+- `src/forja/templates/forja_context.py` - 1 block: history file reading
+
 ---
 
 ## Bug 4: Hardcoded model names outside config_loader
 
-**Root cause:** `constants.py` had `ANTHROPIC_MODEL = "claude-sonnet-4-20250514"` that was unused but could confuse developers. Template files have hardcoded models but that's by design (they run standalone without forja imports).
+**Root cause:** `constants.py` had unused `ANTHROPIC_MODEL`. Template files had hardcoded model names with no way to override them.
 
-**Fix:** Removed unused `ANTHROPIC_MODEL` from `constants.py`. Added comment directing to `config_loader.py` as canonical source. Added comment in template `forja_preflight.py` explaining why the hardcoded model is intentional.
+**Fix:**
+1. Removed unused `ANTHROPIC_MODEL` from `constants.py`
+2. Added `_get_model()` function to template `forja_utils.py` that checks `FORJA_MODELS_*` env vars with fallback to defaults
+3. Updated all template files to use `_get_model()` or env var overrides instead of hardcoded strings
 
 **Files changed:**
 - `src/forja/constants.py` - Removed `ANTHROPIC_MODEL`, added config_loader comment
-- `src/forja/templates/forja_preflight.py` - Added comment about standalone execution
+- `src/forja/templates/forja_utils.py` - Added `_get_model()`, renamed constants to `_DEFAULT_*`, updated `_call_provider()`
+- `src/forja/templates/forja_crossmodel.py` - Uses `_get_model("kimi")` and `KIMI_API_URL` from forja_utils
+- `src/forja/templates/forja_hardening.py` - Uses `_get_model("kimi")` and `KIMI_API_URL` from forja_utils
+- `src/forja/templates/forja_preflight.py` - Uses `FORJA_MODELS_ANTHROPIC_MODEL` env var with default fallback
 
 ---
 
@@ -93,10 +110,10 @@ Intentional differences preserved (template is self-contained, no forja imports)
 - Template lacks `Style` class, `setup_logging()`, `gather_context()`, `safe_read_json()` (package-only)
 
 **Files changed:**
-- `src/forja/templates/forja_utils.py` - Added `time` import, `_sanitize_error_body()`, `tools` param, retry/backoff, broader catches
+- `src/forja/templates/forja_utils.py` - Added `time` import, `_sanitize_error_body()`, `tools` param, retry/backoff, broader catches, `e.reason` in error messages
 
 ---
 
 ## Test Results
 
-All 359 tests passed consistently after each batch of fixes.
+All 359 tests passed consistently after each batch of fixes (6 pytest runs total).

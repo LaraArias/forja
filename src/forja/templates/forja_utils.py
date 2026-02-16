@@ -174,7 +174,7 @@ def _call_kimi_raw(prompt, system, model):
             error_body = e.read().decode("utf-8", errors="replace")
         except Exception as exc:
             print(f"  reading Kimi error body: {exc}", file=sys.stderr)
-        raise RuntimeError(f"Kimi: HTTP {e.code} {_sanitize_error_body(error_body)}") from e
+        raise RuntimeError(f"Kimi: HTTP {e.code} {e.reason} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"Kimi timeout/network: {e}") from e
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
@@ -230,7 +230,7 @@ def _call_anthropic_raw(prompt, system, model, tools=None):
             error_body = e.read().decode("utf-8", errors="replace")
         except Exception as exc:
             print(f"  reading Anthropic error body: {exc}", file=sys.stderr)
-        raise RuntimeError(f"Anthropic: HTTP {e.code} {_sanitize_error_body(error_body)}") from e
+        raise RuntimeError(f"Anthropic: HTTP {e.code} {e.reason} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"Anthropic timeout/network: {e}") from e
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
@@ -278,7 +278,7 @@ def _call_openai_raw(prompt, system, model):
             error_body = e.read().decode("utf-8", errors="replace")
         except Exception as exc:
             print(f"  reading OpenAI error body: {exc}", file=sys.stderr)
-        raise RuntimeError(f"OpenAI: HTTP {e.code} {_sanitize_error_body(error_body)}") from e
+        raise RuntimeError(f"OpenAI: HTTP {e.code} {e.reason} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"OpenAI timeout/network: {e}") from e
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
