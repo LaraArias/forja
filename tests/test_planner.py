@@ -394,6 +394,218 @@ class TestDetectSkill:
         monkeypatch.chdir(tmp_path)
         assert _detect_skill() == "custom"
 
+    def test_detect_skill_dict_landing_page(self, tmp_path, monkeypatch):
+        """skill.json as dict with 'skill' key → 'landing-page'."""
+        from forja.planner import _detect_skill
+        monkeypatch.chdir(tmp_path)
+        tools_dir = tmp_path / ".forja-tools"
+        tools_dir.mkdir(parents=True)
+        skill_data = {
+            "skill": "landing-page",
+            "description": "Build a landing page",
+            "agents": [
+                {"name": "content-strategist", "prompt": "Write copy"},
+                {"name": "frontend-builder", "prompt": "Build HTML"},
+                {"name": "seo-optimizer", "prompt": "Optimize SEO"},
+            ],
+        }
+        (tools_dir / "skill.json").write_text(json.dumps(skill_data))
+        assert _detect_skill() == "landing-page"
+
+    def test_detect_skill_dict_api_backend(self, tmp_path, monkeypatch):
+        """skill.json as dict with 'skill': 'api-backend' → 'api-backend'."""
+        from forja.planner import _detect_skill
+        monkeypatch.chdir(tmp_path)
+        tools_dir = tmp_path / ".forja-tools"
+        tools_dir.mkdir(parents=True)
+        skill_data = {
+            "skill": "api-backend",
+            "description": "Build API backend",
+            "agents": [
+                {"name": "architect", "prompt": "Design"},
+                {"name": "database", "prompt": "Models"},
+                {"name": "backend", "prompt": "Endpoints"},
+                {"name": "security", "prompt": "Review"},
+                {"name": "qa", "prompt": "Test"},
+            ],
+        }
+        (tools_dir / "skill.json").write_text(json.dumps(skill_data))
+        assert _detect_skill() == "api-backend"
+
+    def test_detect_skill_dict_fallback_to_agent_names(self, tmp_path, monkeypatch):
+        """Dict without 'skill' key falls back to agent name detection."""
+        from forja.planner import _detect_skill
+        monkeypatch.chdir(tmp_path)
+        tools_dir = tmp_path / ".forja-tools"
+        tools_dir.mkdir(parents=True)
+        # Dict with agents but no explicit "skill" field
+        skill_data = {
+            "description": "Custom landing page skill",
+            "agents": [
+                {"name": "frontend-builder", "prompt": "Build HTML"},
+                {"name": "seo-optimizer", "prompt": "Optimize SEO"},
+            ],
+        }
+        (tools_dir / "skill.json").write_text(json.dumps(skill_data))
+        assert _detect_skill() == "landing-page"
+
+    def test_detect_skill_dict_unknown_skill_field(self, tmp_path, monkeypatch):
+        """Dict with unknown 'skill' value falls back to agent name detection."""
+        from forja.planner import _detect_skill
+        monkeypatch.chdir(tmp_path)
+        tools_dir = tmp_path / ".forja-tools"
+        tools_dir.mkdir(parents=True)
+        skill_data = {
+            "skill": "unknown-skill",
+            "agents": [
+                {"name": "database", "prompt": "Models"},
+                {"name": "security", "prompt": "Auth"},
+            ],
+        }
+        (tools_dir / "skill.json").write_text(json.dumps(skill_data))
+        assert _detect_skill() == "api-backend"
+
+    def test_detect_skill_prefers_forja_skill_dir(self, tmp_path, monkeypatch):
+        """.forja/skill/agents.json is checked before .forja-tools/skill.json."""
+        from forja.planner import _detect_skill
+        monkeypatch.chdir(tmp_path)
+        # Create both paths with different skills
+        skill_dir = tmp_path / ".forja" / "skill"
+        skill_dir.mkdir(parents=True)
+        tools_dir = tmp_path / ".forja-tools"
+        tools_dir.mkdir(parents=True)
+        # .forja/skill/agents.json → landing-page
+        (skill_dir / "agents.json").write_text(json.dumps(
+            [{"name": "frontend-builder"}]
+        ))
+        # .forja-tools/skill.json → api-backend
+        (tools_dir / "skill.json").write_text(json.dumps(
+            {"skill": "api-backend", "agents": [{"name": "database"}]}
+        ))
+        assert _detect_skill() == "landing-page"
+
+    def test_detect_skill_invalid_json(self, tmp_path, monkeypatch):
+        """Corrupt skill.json → 'custom' (no crash)."""
+        from forja.planner import _detect_skill
+        monkeypatch.chdir(tmp_path)
+        tools_dir = tmp_path / ".forja-tools"
+        tools_dir.mkdir(parents=True)
+        (tools_dir / "skill.json").write_text("not valid json {{{")
+        assert _detect_skill() == "custom"
+
+
+class TestSkillPrdConstraints:
+    """Verify SKILL_PRD_CONSTRAINTS are applied to PRD generation."""
+
+    def test_landing_page_constraint_prepended(self):
+        """skill='landing-page' prepends constraint to prompt."""
+        from forja.planner import _generate_prd_from_idea, SKILL_PRD_CONSTRAINTS
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("A landing page for my SaaS", skill="landing-page")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert prompt_sent.startswith("CRITICAL CONSTRAINT")
+        assert "SINGLE index.html" in prompt_sent
+        assert "NO backend" in prompt_sent
+        assert "NO Kubernetes" in prompt_sent
+
+    def test_api_backend_constraint_prepended(self):
+        """skill='api-backend' prepends FastAPI constraint to prompt."""
+        from forja.planner import _generate_prd_from_idea, SKILL_PRD_CONSTRAINTS
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("Notes API", skill="api-backend")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "CRITICAL CONSTRAINT" in prompt_sent
+        assert "FastAPI" in prompt_sent
+        assert "SQLite" in prompt_sent
+
+    def test_custom_no_constraint(self):
+        """skill='custom' does NOT prepend any constraint."""
+        from forja.planner import _generate_prd_from_idea, SKILL_PRD_CONSTRAINTS
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("A todo app", skill="custom")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert not prompt_sent.startswith("CRITICAL CONSTRAINT")
+
+    def test_default_skill_is_custom(self):
+        """No skill parameter defaults to 'custom' (no constraint)."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("A todo app")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "CRITICAL CONSTRAINT" not in prompt_sent
+
+    def test_constraint_dict_has_all_skills(self):
+        """SKILL_PRD_CONSTRAINTS covers all expected skills."""
+        from forja.planner import SKILL_PRD_CONSTRAINTS
+        assert "landing-page" in SKILL_PRD_CONSTRAINTS
+        assert "api-backend" in SKILL_PRD_CONSTRAINTS
+        assert "custom" in SKILL_PRD_CONSTRAINTS
+        assert SKILL_PRD_CONSTRAINTS["custom"] == ""
+
+    def test_landing_page_prd_with_valid_llm_response(self):
+        """Full round-trip: skill constraint → LLM → structured PRD."""
+        from forja.planner import _generate_prd_from_idea
+        mock_response = json.dumps({
+            "title": "Forja Landing Page",
+            "problem": "Developers need to understand what Forja does",
+            "features": ["Hero section", "How It Works", "CTA"],
+            "stack": {"language": "HTML", "framework": "CSS + JS"},
+            "out_of_scope": ["Backend API", "Database"],
+        })
+        with patch("forja.planner.call_llm", return_value=mock_response) as mock_llm:
+            prd, title = _generate_prd_from_idea(
+                "Landing page for Forja", skill="landing-page"
+            )
+        assert title == "Forja Landing Page"
+        assert "Hero section" in prd
+        assert "HTML" in prd
+        # Verify constraint was in the prompt
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "SINGLE index.html" in prompt_sent
+
+
+class TestScratchFlowSkill:
+    """Verify _scratch_flow passes skill to _generate_prd_from_idea."""
+
+    def test_scratch_flow_passes_skill(self):
+        """_scratch_flow(skill='landing-page') forwards to _generate_prd_from_idea."""
+        from forja.planner import _scratch_flow
+        mock_prd = "# Landing\n## Problem\nNeed a page"
+        inputs = iter(["A landing page for my product", "1"])
+        with patch("builtins.input", side_effect=inputs), \
+             patch("forja.planner._generate_prd_from_idea",
+                   return_value=(mock_prd, "Landing")) as mock_gen, \
+             patch("forja.planner._interactive_prd_edit",
+                   return_value=mock_prd), \
+             patch("forja.planner.PRD_PATH") as mock_prd_path:
+            mock_prd_path.exists.return_value = False
+            mock_prd_path.__str__ = lambda s: "context/prd.md"
+            mock_prd_path.write_text = MagicMock()
+            _scratch_flow(skill="landing-page")
+        # Verify skill was passed
+        mock_gen.assert_called_once()
+        _, kwargs = mock_gen.call_args
+        assert kwargs.get("skill") == "landing-page"
+
+    def test_scratch_flow_default_skill_is_custom(self):
+        """_scratch_flow() without skill defaults to 'custom'."""
+        from forja.planner import _scratch_flow
+        mock_prd = "# App\n## Problem\nNeed an app"
+        inputs = iter(["A todo app", "1"])
+        with patch("builtins.input", side_effect=inputs), \
+             patch("forja.planner._generate_prd_from_idea",
+                   return_value=(mock_prd, "App")) as mock_gen, \
+             patch("forja.planner._interactive_prd_edit",
+                   return_value=mock_prd), \
+             patch("forja.planner.PRD_PATH") as mock_prd_path:
+            mock_prd_path.exists.return_value = False
+            mock_prd_path.__str__ = lambda s: "context/prd.md"
+            mock_prd_path.write_text = MagicMock()
+            _scratch_flow()
+        mock_gen.assert_called_once()
+        _, kwargs = mock_gen.call_args
+        assert kwargs.get("skill") == "custom"
+
 
 class TestRunExpertQa:
     """Verify _run_expert_qa orchestrates a full Q&A round."""

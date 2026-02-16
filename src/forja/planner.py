@@ -129,6 +129,29 @@ Do NOT ask about visual design, CSS, or frontend layout.""",
     "custom": """The project type is general. Experts should focus on the most relevant aspects based on the PRD content.""",
 }
 
+SKILL_PRD_CONSTRAINTS = {
+    "landing-page": (
+        "CRITICAL CONSTRAINT: The user selected 'Landing Page' as the project type.\n"
+        "This means:\n"
+        "- Output is a SINGLE index.html file with inline CSS and JS\n"
+        "- NO backend, NO database, NO API, NO server\n"
+        "- NO Kubernetes, NO Docker, NO Terraform, NO Helm\n"
+        "- NO Next.js, NO NestJS, NO PostgreSQL, NO Redis\n"
+        "- Stack is: HTML + CSS + JavaScript. That's it.\n"
+        "- The page is a MARKETING SITE that explains and sells the product\n"
+        "- Sections should be: Hero, How It Works, Features, Social Proof, CTA, Footer\n"
+        "- The PRD describes WHAT THE PAGE SHOWS, not what the product does internally\n"
+        "Generate a PRD for a static marketing landing page, NOT for the product being marketed."
+    ),
+    "api-backend": (
+        "CRITICAL CONSTRAINT: The user selected 'API Backend' as the project type.\n"
+        "Stack must be: Python + FastAPI + SQLite.\n"
+        "No Docker, no Kubernetes, no external databases that need installation.\n"
+        "Focus on endpoints, data models, validation, and error handling."
+    ),
+    "custom": "",
+}
+
 
 def _detect_skill() -> str:
     """Detect which skill is active. Returns 'landing-page', 'api-backend', or 'custom'."""
@@ -136,7 +159,15 @@ def _detect_skill() -> str:
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                agent_names = [a.get("name", "") for a in data] if isinstance(data, list) else []
+                # Handle dict format: {"skill": "landing-page", "agents": [...]}
+                if isinstance(data, dict):
+                    skill_field = data.get("skill", "")
+                    if skill_field in ("landing-page", "api-backend"):
+                        return skill_field
+                    agents = data.get("agents", [])
+                else:
+                    agents = data if isinstance(data, list) else []
+                agent_names = [a.get("name", "") for a in agents]
                 if "frontend-builder" in agent_names or "seo-optimizer" in agent_names:
                     return "landing-page"
                 if "database" in agent_names or "security" in agent_names:
@@ -234,13 +265,21 @@ def _read_existing_context() -> str | None:
     return "\n\n".join(parts)
 
 
-def _generate_prd_from_idea(user_idea):
+def _generate_prd_from_idea(user_idea, skill="custom"):
     """Call Kimi to generate a structured PRD from a project idea.
+
+    When *skill* is ``'landing-page'`` or ``'api-backend'``, a constraint
+    preamble is prepended so the LLM doesn't hallucinate an enterprise
+    platform when the user asked for a static HTML page.
 
     Returns (prd_markdown, title) or (None, None) on failure.
     """
+    prompt = PRD_FROM_IDEA_PROMPT.format(user_idea=user_idea)
+    skill_constraint = SKILL_PRD_CONSTRAINTS.get(skill, "")
+    if skill_constraint:
+        prompt = skill_constraint + "\n\n" + prompt
     raw = call_llm(
-        PRD_FROM_IDEA_PROMPT.format(user_idea=user_idea),
+        prompt,
         system="You are a senior product manager. Respond only with valid JSON.",
     )
     if not raw:
@@ -282,11 +321,14 @@ def _generate_prd_from_idea(user_idea):
     return md.strip(), title
 
 
-def _scratch_flow(existing_context: str | None = None):
+def _scratch_flow(existing_context: str | None = None, skill: str = "custom"):
     """Interactive flow to create a PRD from scratch (or from existing context).
 
     When *existing_context* is provided (from context_setup), the "Describe
     your project idea" prompt is skipped and the context is used directly.
+
+    *skill* is forwarded to ``_generate_prd_from_idea`` so the LLM prompt
+    includes project-type constraints (e.g. "Landing Page = HTML only").
 
     Returns (prd_content, should_continue_to_expert_panel) or (None, False) on abort.
     """
@@ -320,7 +362,7 @@ def _scratch_flow(existing_context: str | None = None):
 
         # Call Kimi to generate PRD
         print(f"\n  {DIM}Generating PRD draft...{RESET}")
-        prd_content, title = _generate_prd_from_idea(idea)
+        prd_content, title = _generate_prd_from_idea(idea, skill=skill)
 
         if not prd_content:
             print(f"  {RED}Could not generate PRD (Kimi unavailable or invalid response).{RESET}")
@@ -1141,6 +1183,9 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     """
     prd_file = Path(prd_path) if prd_path else PRD_PATH
 
+    # Detect skill early so scratch flow can constrain PRD generation
+    skill = _detect_skill()
+
     # Check if PRD is missing or empty/placeholder → scratch flow
     prd_missing = not prd_file.exists()
     prd_empty = False
@@ -1154,7 +1199,7 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     if prd_missing or prd_empty:
         load_dotenv()
         existing_context = _read_existing_context()
-        prd_content, continue_to_panel = _scratch_flow(existing_context)
+        prd_content, continue_to_panel = _scratch_flow(existing_context, skill=skill)
         if not prd_content:
             return False
         if not continue_to_panel:
@@ -1173,8 +1218,6 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     # Gather context
     context = _gather_context()
 
-    # Detect skill for round-specific guidance
-    skill = _detect_skill()
     base_guidance = SKILL_EXPERT_GUIDANCE.get(skill, SKILL_EXPERT_GUIDANCE["custom"])
 
     round_data: list[dict] = []
