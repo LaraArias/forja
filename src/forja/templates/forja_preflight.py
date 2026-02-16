@@ -103,7 +103,7 @@ def _check_anthropic_api_key():
 
     # Use the messages endpoint with a minimal request to validate the key.
     # Model name from env var override or default.
-    model = os.environ.get("FORJA_MODELS_ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    model = os.environ.get("FORJA_MODELS_ANTHROPIC_MODEL", "claude-opus-4-6")
     url = "https://api.anthropic.com/v1/messages"
     body = json.dumps({
         "model": model,

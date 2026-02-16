@@ -852,6 +852,69 @@ def _release_pid_lock():
         logger.debug("Could not remove runner PID file: %s", exc)
 
 
+def _auto_open_output():
+    """Open the built project output in the browser automatically."""
+    import socket
+    import webbrowser
+
+    from forja.planner import _detect_skill
+
+    skill = _detect_skill()
+
+    if skill == "landing-page":
+        # Search common landing page output paths
+        candidates = [
+            Path("index.html"),
+            *Path(".").rglob("index.html"),
+        ]
+        # Filter out node_modules and hidden dirs
+        for candidate in candidates:
+            parts = candidate.parts
+            if any(p.startswith(".") or p == "node_modules" for p in parts):
+                continue
+            url = f"file://{candidate.resolve()}"
+            print(f"\n  {GREEN}Opening landing page in browser...{RESET}")
+            webbrowser.open(url)
+            return
+
+    elif skill == "api-backend":
+        for port in (8765, 8000, 3000):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1)
+                if sock.connect_ex(("localhost", port)) == 0:
+                    url = f"http://localhost:{port}/docs"
+                    print(f"\n  {GREEN}Opening API docs: {url}{RESET}")
+                    webbrowser.open(url)
+                    return
+            except OSError:
+                pass
+            finally:
+                sock.close()
+        print(f"\n  {DIM}API built. Start with: python3 -m uvicorn src.main:app --port 8765{RESET}")
+        print(f"  {DIM}Then visit: http://localhost:8765/docs{RESET}")
+        return
+
+    else:
+        # Custom / unknown — try common output files
+        for name in ("index.html", "dist/index.html", "build/index.html",
+                      "out/index.html", "public/index.html"):
+            p = Path(name)
+            if p.exists():
+                url = f"file://{p.resolve()}"
+                print(f"\n  {GREEN}Opening {name} in browser...{RESET}")
+                webbrowser.open(url)
+                return
+
+    # Fallback: open observatory report if it exists
+    observatory_html = FORJA_DIR / "observatory" / "evals.html"
+    if observatory_html.exists():
+        url = f"file://{observatory_html.resolve()}"
+        print(f"\n  {GREEN}Opening observatory report...{RESET}")
+        webbrowser.open(url)
+        return
+
+
 def run_forja(prd_path: str | None = None) -> bool:
     """Run the full Forja pipeline: init → plan → build.
 
@@ -1093,6 +1156,11 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     # ── Phase 6: Observatory (informational) ──
     _phase_header(6, "Observatory Report", 6)
     _run_observatory()
+
+    # ── Auto-open output ──
+    cfg = load_config()
+    if cfg.build.auto_open:
+        _auto_open_output()
 
     # ── Final summary ──
     total_elapsed = time.time() - pipeline_start

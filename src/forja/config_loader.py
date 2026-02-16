@@ -23,10 +23,11 @@ _DEFAULTS = {
         "timeout_stall_minutes": 12,
         "timeout_absolute_minutes": 20,
         "max_cycles_per_feature": 5,
+        "auto_open": True,
     },
     "models": {
         "kimi_model": "kimi-k2-0711-preview",
-        "anthropic_model": "claude-sonnet-4-20250514",
+        "anthropic_model": "claude-opus-4-6",
         "openai_model": "gpt-4o",
         "validation_provider": "auto",
     },
@@ -47,6 +48,7 @@ class BuildConfig:
     timeout_stall_minutes: int
     timeout_absolute_minutes: int
     max_cycles_per_feature: int
+    auto_open: bool
 
 
 @dataclass(frozen=True)
@@ -153,7 +155,9 @@ def _apply_env_overrides(merged: dict) -> None:
             if env_val is not None:
                 # Coerce to same type as default
                 default_val = section_dict[key]
-                if isinstance(default_val, int):
+                if isinstance(default_val, bool):
+                    section_dict[key] = env_val.lower() in ("1", "true", "yes")
+                elif isinstance(default_val, int):
                     try:
                         section_dict[key] = int(env_val)
                     except ValueError:

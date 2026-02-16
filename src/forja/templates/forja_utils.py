@@ -38,7 +38,7 @@ WARN_ICON = f"{YELLOW}[WARN]{RESET}"
 # ── LLM constants (overridden by FORJA_MODELS_* env vars) ──────────
 
 _DEFAULT_KIMI_MODEL = "kimi-k2-0711-preview"
-_DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
 _DEFAULT_OPENAI_MODEL = "gpt-4o"
 KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"

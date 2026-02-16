@@ -1208,3 +1208,61 @@ class TestContextInjection:
             _generate_prd_from_idea("A todo app", context="")
         prompt_sent = mock_llm.call_args[0][0]
         assert "BUSINESS CONTEXT" not in prompt_sent
+
+
+class TestAntiHallucination:
+    """Verify anti-hallucination guardrails are present in all prompts."""
+
+    def test_prd_prompt_has_anti_hallucination(self):
+        """PRD_FROM_IDEA_PROMPT contains anti-hallucination instruction."""
+        from forja.planner import PRD_FROM_IDEA_PROMPT
+        prompt = PRD_FROM_IDEA_PROMPT.lower()
+        assert "do not invent" in prompt
+
+    def test_prd_system_msg_has_anti_hallucination(self):
+        """System message in _generate_prd_from_idea includes anti-hallucination."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("Test app", skill="landing-page")
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "anti-hallucination" in system_sent.lower()
+
+    def test_enriched_prd_system_msg_has_anti_hallucination(self):
+        """Enriched PRD system message includes anti-hallucination."""
+        from forja.planner import _generate_enriched_prd
+        with patch("forja.planner.call_llm", return_value="# PRD") as mock_llm:
+            _generate_enriched_prd("# PRD", [], [])
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "do not add" in system_sent.lower() or "do not invent" in system_sent.lower()
+
+    def test_enriched_prd_user_prompt_has_anti_hallucination(self):
+        """Enriched PRD user prompt includes do-not-invent instruction."""
+        from forja.planner import _generate_enriched_prd
+        with patch("forja.planner.call_llm", return_value="# PRD") as mock_llm:
+            _generate_enriched_prd("# PRD", [], [])
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "do not add" in prompt_sent.lower() or "do not invent" in prompt_sent.lower()
+
+    def test_what_panel_has_anti_hallucination(self):
+        """WHAT_PANEL_PROMPT includes anti-hallucination guardrail."""
+        from forja.planner import WHAT_PANEL_PROMPT
+        assert "do not invent" in WHAT_PANEL_PROMPT.lower()
+
+    def test_how_panel_has_anti_hallucination(self):
+        """HOW_PANEL_PROMPT includes anti-hallucination guardrail."""
+        from forja.planner import HOW_PANEL_PROMPT
+        prompt = HOW_PANEL_PROMPT.lower()
+        assert "do not suggest" in prompt or "do not invent" in prompt
+
+    def test_proof_point_schema_allows_placeholder(self):
+        """proof_point in schema should indicate it can be a placeholder."""
+        from forja.planner import PRD_FROM_IDEA_PROMPT
+        assert "NEEDS EVIDENCE" in PRD_FROM_IDEA_PROMPT or "TBD" in PRD_FROM_IDEA_PROMPT
+
+    def test_prd_prompt_forbids_specific_hallucinations(self):
+        """PRD prompt specifically forbids common hallucination types."""
+        from forja.planner import PRD_FROM_IDEA_PROMPT
+        prompt = PRD_FROM_IDEA_PROMPT.lower()
+        assert "metrics" in prompt
+        assert "user counts" in prompt or "testimonials" in prompt
+        assert "deployment commands" in prompt or "tool versions" in prompt

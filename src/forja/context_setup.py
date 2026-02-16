@@ -178,14 +178,25 @@ def _setup_company(target: Path) -> tuple[str | None, str | None]:
 
     if not docs_path or not Path(docs_path).exists():
         print(f"  {DIM}Generating company overview...{RESET}")
-        raw = call_llm(
-            f"Generate a concise company overview for a software project. "
-            f"Company: {name}. Description: {desc}. "
-            f"Include: what the company does, target market, key differentiators, tech philosophy. "
-            f"Max 30 lines markdown.",
-            system="You respond only with the requested content. No preamble.",
-            max_retries=0,
-        )
+        try:
+            raw = call_llm(
+                f"Generate a concise company overview for a software project. "
+                f"Company: {name}. Description: {desc}. "
+                f"Include: what the company does, target market, key differentiators, tech philosophy. "
+                f"Max 30 lines markdown.",
+                system=(
+                    "You respond only with the requested content. No preamble. "
+                    "CRITICAL: Only use information the user provided. "
+                    "Do NOT invent metrics, statistics, user counts, test coverage numbers, "
+                    "or any specific claims. If information was not provided, write "
+                    "'[TO BE DEFINED]' instead of inventing. Never fabricate testimonials, "
+                    "quotes, or evidence."
+                ),
+                provider="anthropic",
+                max_retries=0,
+            )
+        except Exception:
+            raw = ""
         if raw:
             overview = AUTO_HEADER + raw.strip() + "\n"
         else:
@@ -227,25 +238,38 @@ def _setup_domain(target: Path, name: str, desc: str) -> str | None:
     obj_text = "\n".join(f"- {o}" for o in objections) if objections else "- None specified"
 
     print(f"  {DIM}Generating domain context...{RESET}")
-    raw = call_llm(
-        f"Generate domain context files for a {audience_label} software project.\n"
-        f"Company: {name} - {desc}\n"
-        f"Audience: {audience_label}\n"
-        f"Value prop: {value_prop}\n"
-        f"Objections:\n{obj_text}\n\n"
-        f"Generate 3 files as JSON:\n"
-        f'{{\n'
-        f'  "domain_md": "DOMAIN.md content - bounded context with: primary driver, '
-        f'audience table (roles + top concerns), competitor benchmarks (generic for this industry), '
-        f'anti-patterns (what NOT to do/say), key messages. Max 40 lines.",\n'
-        f'  "value_props_md": "value-props.md content - main value prop expanded + 3 secondary props '
-        f'with proof points and quotes per audience role. Max 50 lines.",\n'
-        f'  "objections_md": "objections.md content - each objection with response strategy '
-        f'and supporting data points. Max 30 lines."\n'
-        f'}}',
-        system="You are a domain expert. Respond only with valid JSON.",
-        max_retries=0,
-    )
+    try:
+        raw = call_llm(
+            f"Generate domain context files for a {audience_label} software project.\n"
+            f"Company: {name} - {desc}\n"
+            f"Audience: {audience_label}\n"
+            f"Value prop: {value_prop}\n"
+            f"Objections:\n{obj_text}\n\n"
+            f"Generate 3 files as JSON:\n"
+            f'{{\n'
+            f'  "domain_md": "DOMAIN.md content - bounded context with: primary driver, '
+            f'audience table (roles + top concerns based on the user input above), '
+            f'anti-patterns (what NOT to do/say), key messages. '
+            f'Do NOT include competitor benchmarks unless the user mentioned them. Max 40 lines.",\n'
+            f'  "value_props_md": "value-props.md content - main value prop expanded + 2-3 secondary '
+            f'props derived from the value proposition above. '
+            f'Do NOT invent proof points, statistics, or quotes. '
+            f'If no evidence was provided, write [NEEDS EVIDENCE]. Max 50 lines.",\n'
+            f'  "objections_md": "objections.md content - each objection the user listed, with a '
+            f'response strategy. Do NOT invent data points or statistics. '
+            f'Base responses only on the value proposition provided. Max 30 lines."\n'
+            f'}}',
+            system=(
+                "You are a domain expert. Respond only with valid JSON. "
+                "CRITICAL: Base ALL content strictly on the user's input above. "
+                "Do NOT invent metrics, statistics, benchmarks, quotes, user counts, "
+                "or any specific numerical claims. If data is missing, write '[NEEDS DATA]'."
+            ),
+            provider="anthropic",
+            max_retries=0,
+        )
+    except Exception:
+        raw = ""
     if raw:
         data = parse_json(raw)
         if data:
@@ -386,18 +410,24 @@ def _setup_design_system(target: Path, name: str) -> None:
     )
     print(f"  {PASS_ICON} Generated context/company/brand-assets/typography.json")
 
-    # Generate DESIGN-REFERENCE.md via Kimi
+    # Generate DESIGN-REFERENCE.md via Anthropic
     print(f"  {DIM}Generating design reference...{RESET}")
-    raw = call_llm(
-        f"Generate a design reference guide for a {style_label} landing page. "
-        f"Primary color: {primary}. Secondary/accent: {secondary}. Font: {font}. "
-        f"Include: color palette with CSS variables, typography scale, layout patterns "
-        f"(section structure), component patterns (buttons, cards, navigation), "
-        f"spacing rules, illustration style recommendations, list of things NOT to do. "
-        f"Format as markdown. Max 80 lines.",
-        system="You respond only with the requested content. No preamble.",
-        max_retries=0,
-    )
+    try:
+        raw = call_llm(
+            f"Generate a design reference guide for a {style_label} landing page. "
+            f"Primary color: {primary}. Secondary/accent: {secondary}. Font: {font}. "
+            f"Include: color palette with CSS variables, typography scale, layout patterns "
+            f"(section structure), component patterns (buttons, cards, navigation), "
+            f"spacing rules, illustration style recommendations, list of things NOT to do. "
+            f"These are suggestions — the user may override any value. "
+            f"Format as markdown. Max 80 lines.",
+            system="You respond only with the requested content. No preamble. "
+            "These are design SUGGESTIONS based on the user's chosen style and colors.",
+            provider="anthropic",
+            max_retries=0,
+        )
+    except Exception:
+        raw = ""
     if raw:
         ref_content = AUTO_HEADER + raw.strip() + "\n"
     else:

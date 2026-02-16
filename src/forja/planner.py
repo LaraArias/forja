@@ -213,6 +213,11 @@ A developer wants to build a software project. Here is their input:
 Generate a structured PRD. For EACH feature, include a one-sentence acceptance criterion \
 (how do you know this feature is done?).
 
+IMPORTANT: Only include information that comes from the PROJECT INPUT above. \
+Do NOT invent: metrics, statistics, user counts, testimonials, benchmark numbers, \
+specific tool versions, deployment commands, or product capabilities not described above. \
+If a field requires data you don't have, use '[TO BE DEFINED]' instead of fabricating.
+
 Return JSON:
 {{
   "title": "string — name of the project",
@@ -226,7 +231,7 @@ Return JSON:
   "value_propositions": {{
     "main": "string — the primary value proposition",
     "secondary": [
-      {{"prop": "string — value proposition", "proof_point": "string — evidence or data"}}
+      {{"prop": "string — value proposition", "proof_point": "string — evidence from user input, or '[NEEDS EVIDENCE]' if not provided"}}
     ]
   }},
   "key_messages": ["string — core message for the target audience"],
@@ -456,9 +461,19 @@ def _generate_prd_from_idea(user_idea, skill="custom", context=""):
     system_parts.append(
         "You are a senior product manager. Respond only with valid JSON."
     )
+    system_parts.append(
+        "ANTI-HALLUCINATION: Do NOT invent metrics, user counts, test coverage numbers, "
+        "deployment commands, or product capabilities. Only use data from the input. "
+        "For unknowns, write '[TBD]'. Never fabricate: npm/pip commands, "
+        "infrastructure (Docker, Terraform, K8s), security features (SSO, RBAC), "
+        "or social proof (testimonials, user counts)."
+    )
     system_msg = "\n\n".join(system_parts)
 
-    raw = call_llm(prompt, system=system_msg)
+    try:
+        raw = call_llm(prompt, system=system_msg, provider="anthropic")
+    except Exception:
+        raw = ""
     if not raw:
         return None, None
 
@@ -767,6 +782,9 @@ WHAT_PANEL_PROMPT = (
     "2. Ask ONE critical question that must be answered before building\n"
     "3. Suggest a default answer based on their experience\n\n"
     "Synthesize into 6 total questions ordered by impact.\n\n"
+    "CRITICAL: Expert 'default' answers must be GENERIC best practices, "
+    "not specific claims about the product. Do NOT invent metrics, user counts, "
+    "testimonials, or specific tool versions in defaults.\n\n"
     + _PANEL_JSON_SCHEMA
 )
 
@@ -786,6 +804,9 @@ HOW_PANEL_PROMPT = (
     "2. Ask ONE critical question about HOW to build it\n"
     "3. Suggest a concrete default\n\n"
     "Synthesize into 7 total questions ordered by impact.\n\n"
+    "CRITICAL: Default answers must be realistic for an MVP. Do NOT suggest "
+    "enterprise features (SSO, RBAC, audit logs, VPC deploy) unless the PRD "
+    "explicitly requires them. Prefer simple solutions.\n\n"
     + _PANEL_JSON_SCHEMA
 )
 
@@ -992,13 +1013,17 @@ def _do_research(expert_name, topic, prd_summary, experts=None):
     else:
         # Fallback: any provider without web search
         print(f"  {YELLOW}Web search unavailable, using expert knowledge only{RESET}")
-        raw = call_llm(
-            f"The project context: {prd_summary}\n\n"
-            f"Research topic: {topic}\n\n"
-            f"Respond as {expert_name} would: with specific data, benchmarks, "
-            f"and a concrete recommendation. Keep it under 200 words.",
-            system=f"You are {expert_name}, a domain expert. Answer concisely with concrete data and a clear recommendation.",
-        )
+        try:
+            raw = call_llm(
+                f"The project context: {prd_summary}\n\n"
+                f"Research topic: {topic}\n\n"
+                f"Respond as {expert_name} would: with specific data, benchmarks, "
+                f"and a concrete recommendation. Keep it under 200 words.",
+                system=f"You are {expert_name}, a domain expert. Answer concisely with concrete data and a clear recommendation.",
+                provider="anthropic",
+            )
+        except Exception:
+            raw = ""
         if raw:
             findings = raw.strip()
             print()
@@ -1107,9 +1132,10 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
     # Format Q&A transcript
     transcript_text = ""
     for item in qa_transcript:
-        tag = item["tag"]
+        tag = item.get("tag", "DECISION")
+        expert = item.get("expert", item.get("expert_name", "Expert"))
         transcript_text += (
-            f"[{tag}] {item['expert']}: {item['question']}\n"
+            f"[{tag}] {expert}: {item['question']}\n"
             f"  Answer: {item['answer']}\n\n"
         )
 
@@ -1159,23 +1185,33 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
     skill_constraint = SKILL_PRD_CONSTRAINTS.get(skill, "")
     system_msg = (
         "You are a senior technical writer. Generate a complete enriched PRD "
-        "in markdown. Respond ONLY with the PRD, no JSON, no preamble."
+        "in markdown. Respond ONLY with the PRD, no JSON, no preamble. "
+        "ANTI-HALLUCINATION: ONLY incorporate information from the expert Q&A answers "
+        "and the original PRD. Do NOT add features, metrics, deployment details, "
+        "or capabilities that were not discussed. Do NOT invent npm/pip commands, "
+        "URLs, user counts, or infrastructure."
     )
     if skill_constraint:
         system_msg = skill_constraint + "\n\n" + system_msg
 
-    raw = call_llm(
-        f"The experts ({experts_text}) have received the user's answers. "
-        f"Generate the enriched PRD.\n\n"
-        f"Experts and their questions/answers:\n{transcript_text}\n"
-        f"Original PRD:\n{prd_content}\n\n"
-        f"Generate a complete PRD that incorporates all answers. Structure:\n"
-        f"{sections_text}"
-        f"{design_section}"
-        f"{research_section}\n\n"
-        f"Respond ONLY with the complete PRD in markdown.",
-        system=system_msg,
-    )
+    try:
+        raw = call_llm(
+            f"The experts ({experts_text}) have received the user's answers. "
+            f"Generate the enriched PRD.\n\n"
+            f"Experts and their questions/answers:\n{transcript_text}\n"
+            f"Original PRD:\n{prd_content}\n\n"
+            f"Generate a complete PRD that incorporates all answers. Structure:\n"
+            f"{sections_text}"
+            f"{design_section}"
+            f"{research_section}\n\n"
+            f"IMPORTANT: Do NOT add information that was not in the original PRD or "
+            f"the expert Q&A. Do NOT invent commands, URLs, metrics, or claims.\n\n"
+            f"Respond ONLY with the complete PRD in markdown.",
+            system=system_msg,
+            provider="anthropic",
+        )
+    except Exception:
+        raw = ""
     if raw:
         # Strip markdown wrappers if present
         text = raw.strip()
@@ -1196,14 +1232,18 @@ def _modify_prd_section(prd_text: str, feedback: str) -> str:
         f"Modify ONLY the relevant section. Keep everything else unchanged. "
         f"Return the full updated PRD."
     )
-    result = call_llm(
-        prompt,
-        system=(
-            "You are a PRD editor. Make minimal targeted changes based on the "
-            "user's feedback. Do not rewrite sections that don't need changes. "
-            "Return ONLY the PRD in markdown, no preamble."
-        ),
-    )
+    try:
+        result = call_llm(
+            prompt,
+            system=(
+                "You are a PRD editor. Make minimal targeted changes based on the "
+                "user's feedback. Do not rewrite sections that don't need changes. "
+                "Return ONLY the PRD in markdown, no preamble."
+            ),
+            provider="anthropic",
+        )
+    except Exception:
+        result = ""
     if result:
         text = result.strip()
         if text.startswith("```"):
@@ -1223,14 +1263,18 @@ def _regenerate_prd_with_feedback(prd_text: str, feedback: str) -> str:
         f"Regenerate the PRD incorporating this feedback. Keep the same "
         f"structure but improve based on the feedback."
     )
-    result = call_llm(
-        prompt,
-        system=(
-            "You are a PRD writer. Regenerate the PRD incorporating the "
-            "user's feedback while maintaining professional structure. "
-            "Return ONLY the PRD in markdown, no preamble."
-        ),
-    )
+    try:
+        result = call_llm(
+            prompt,
+            system=(
+                "You are a PRD writer. Regenerate the PRD incorporating the "
+                "user's feedback while maintaining professional structure. "
+                "Return ONLY the PRD in markdown, no preamble."
+            ),
+            provider="anthropic",
+        )
+    except Exception:
+        result = ""
     if result:
         text = result.strip()
         if text.startswith("```"):
@@ -1346,13 +1390,17 @@ def _run_expert_qa(
 
     print(f"\n  {DIM}Assembling {round_label} expert panel...{RESET}")
 
-    raw = call_llm(
-        f"{prompt_template}\n\n"
-        f"IMPORTANT CONTEXT:\n{skill_guidance}\n\n"
-        f"PRD:\n{prd_content}\n\n"
-        f"Available context:\n{context}",
-        system="You are a conductor of expertise. Respond only with valid JSON.",
-    )
+    try:
+        raw = call_llm(
+            f"{prompt_template}\n\n"
+            f"IMPORTANT CONTEXT:\n{skill_guidance}\n\n"
+            f"PRD:\n{prd_content}\n\n"
+            f"Available context:\n{context}",
+            system="You are a conductor of expertise. Respond only with valid JSON.",
+            provider="anthropic",
+        )
+    except Exception:
+        raw = ""
     panel = None
     if raw:
         panel = parse_json(raw)

@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -7,7 +8,10 @@ from sqlalchemy.orm import Session
 from auth.database import get_db
 from auth.models import User
 
-SECRET_KEY = "forja-secret-key-change-in-production"
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY", os.environ.get("SECRET_KEY", ""))
+if not SECRET_KEY:
+    import secrets
+    SECRET_KEY = secrets.token_urlsafe(32)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 

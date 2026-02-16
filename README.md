@@ -8,6 +8,22 @@ project with architecture, tests, and metrics.
 
 ---
 
+## Try It
+
+```bash
+pip install -e .
+forja config    # Set your API keys (Kimi + Anthropic)
+forja init      # Select Landing Page, describe your project
+forja run       # Watch the pipeline build
+forja report    # View observatory dashboard
+```
+
+### API Keys Required
+- **Kimi**: Free at https://platform.moonshot.cn/
+- **Anthropic**: https://console.anthropic.com/
+
+---
+
 ## Why Forja Exists
 
 When the cost of building approaches zero, the cost of building the wrong
@@ -166,7 +182,7 @@ max_cycles_per_feature = 5         # Max retries before blocking a feature
 
 [models]
 kimi_model = "kimi-k2-0711-preview"
-anthropic_model = "claude-sonnet-4-20250514"
+anthropic_model = "claude-opus-4-6"
 openai_model = "gpt-4o"
 validation_provider = "auto"       # auto, kimi, anthropic, openai
 
@@ -202,7 +218,7 @@ Requires:
 ## Testing
 
 ```bash
-pytest  # 350+ tests
+pytest  # 414 tests (411 unit + 3 real API integration)
 ```
 
 ---

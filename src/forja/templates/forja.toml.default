@@ -7,10 +7,11 @@
 timeout_stall_minutes = 12
 timeout_absolute_minutes = 20
 max_cycles_per_feature = 5
+auto_open = true
 
 [models]
 kimi_model = "kimi-k2-0711-preview"
-anthropic_model = "claude-sonnet-4-20250514"
+anthropic_model = "claude-opus-4-6"
 openai_model = "gpt-4o"
 validation_provider = "auto"  # auto, kimi, anthropic, openai
 
