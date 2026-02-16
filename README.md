@@ -8,71 +8,6 @@ No manual coding. No copy-paste prompts. One command.
 
 ---
 
-## The Problem
-
-Building software with AI assistants today means:
-
-- Writing prompts over and over for each piece of the system
-- Losing context when conversations get too long
-- No validation that the output actually matches what you asked for
-- No memory between sessions -- the AI forgets everything
-- No way to catch blind spots when Claude reviews its own code
-
-Forja solves all of these with a pipeline that plans, builds, validates,
-and learns -- autonomously.
-
----
-
-## How It Works
-
-```
-PRD.md
-  |
-  v
-+------------------+
-|   Spec Review    |  Kimi analyzes PRD for gaps and ambiguities
-+------------------+  auto-appends enrichment
-  |
-  v
-+------------------+
-|   God Plan Mode  |  3 domain experts debate your PRD
-+------------------+  facts, decisions, assumptions tracked
-  |
-  v
-+------------------+
-|  Context Inject  |  Store + learnings + business context
-+------------------+  injected into CLAUDE.md
-  |
-  v
-+------------------+
-|  Agent Teams     |  Claude Code spawns 2-4 teammates
-+------------------+  each owns one epic, builds in parallel
-  |
-  v
-+------------------+
-| Cross-Model QA   |  Kimi reviews code (not Claude)
-+------------------+  independent, unbiased validation
-  |
-  v
-+------------------+
-| Outcome Eval     |  PRD coverage score
-+------------------+  met vs unmet requirements
-  |
-  v
-+------------------+
-| Extract Learnings|  Patterns saved for next run
-+------------------+
-  |
-  v
-+------------------+
-|   Observatory    |  HTML dashboard with full metrics
-+------------------+
-
-Tested software + dashboard
-```
-
----
-
 ## Quick Start
 
 ```bash
@@ -86,25 +21,99 @@ forja config
 forja init my-project
 cd my-project
 
-# Enrich your PRD with expert panel (optional)
-forja plan context/prd.md
-
 # Build everything
-forja run context/prd.md
-
-# Check progress
-forja status
+forja run
 ```
 
-During `forja init`, you pick a skill (Landing Page, API Backend, or Custom)
-and walk through an interactive setup that generates business context,
-domain files, and a design system -- all fed to agents during the build.
+`forja init` picks a skill (Landing Page, API Backend, or Custom), walks
+through an interactive setup that generates business context, domain files,
+and a design system, then launches Plan Mode automatically. Edit
+`context/prd.md`, then run `forja run`.
+
+```bash
+# Other commands
+forja plan              # Re-run expert panel on PRD
+forja status            # Feature progress per teammate
+forja report            # Regenerate observatory dashboard
+forja init --upgrade    # Update templates without re-running setup
+```
+
+---
+
+## How It Works
+
+Six-phase pipeline, fully autonomous:
+
+```
+PRD.md
+  |
+  v
++--------------------+
+| 0. Spec Review     |  Kimi analyzes PRD for gaps and ambiguities
++--------------------+  auto-appends enrichment to PRD
+  |
+  v
++--------------------+
+| 1. Context Inject  |  Store + learnings + business context
++--------------------+  injected into CLAUDE.md for all agents
+  |
+  v
++--------------------+
+| 2. Build           |  Claude Code spawns 2-4 teammates
++--------------------+  each owns one epic, builds in parallel
+  |
+  v
++--------------------+
+| 3. Outcome Eval    |  PRD coverage score (met vs unmet)
++--------------------+  powered by Kimi cross-model review
+  |
+  v
++--------------------+
+| 4. Learnings       |  Patterns extracted and saved
++--------------------+  reused on the next run
+  |
+  v
++--------------------+
+| 5. Observatory     |  HTML dashboard with full metrics
++--------------------+
+
+Tested software + dashboard
+```
+
+**Phase 0 -- Spec Review.**
+Kimi reads the PRD and returns ambiguities, gaps, and implicit assumptions.
+The runner auto-appends enrichment to the PRD so agents get a cleaner spec.
+
+**Phase 1 -- Context Injection.**
+The runner reads `context/_index.md`, the decision store, the learnings
+manifest, and all business context files. Everything is injected into
+CLAUDE.md so every agent starts with the same information.
+
+**Phase 2 -- Build.**
+Claude Code is spawned with the enriched CLAUDE.md. The lead agent (Head of
+Product) decomposes the PRD into 2-4 epics, generates teammate instructions,
+and launches Agent Teams. Each teammate owns one epic and builds independently.
+A QA teammate runs integration tests after all builders finish. Progress is
+monitored with a live spinner and progress bar. The build uses process group
+management (`os.setsid` / `os.killpg`) to ensure no zombie processes.
+
+**Phase 3 -- Outcome Evaluation.**
+Kimi compares the PRD requirements against what was actually built.
+Returns a coverage percentage and lists met vs unmet requirements.
+
+**Phase 4 -- Extract Learnings.**
+Patterns from the outcome report, cross-model reviews, and git commits
+are extracted and stored as append-only JSONL in `context/learnings/`.
+
+**Phase 5 -- Observatory.**
+All artifacts are collected into a single-file HTML dashboard at
+`.forja/observatory/evals.html`.
 
 ---
 
 ## Features
 
-### God Plan Mode
+### Plan Mode
 
 Interactive PRD enrichment before a single line of code is written.
 Kimi assembles 3 domain experts based on your project. They ask hard
@@ -114,7 +123,7 @@ document. The output includes an Assumption Density metric so you know
 exactly how solid your spec is.
 
 ```bash
-forja plan context/prd.md
+forja plan
 ```
 
 ### Skills and Specialized Agents
@@ -123,14 +132,20 @@ Pre-built agent team configurations for common project types.
 Each skill defines agents with specific roles and context-aware prompts.
 
 **Landing Page** -- 5 agents: content strategist, frontend builder,
-UX reviewer, SEO optimizer, QA. The content strategist reads your
-domain files for messaging. The frontend builder follows your design system.
+UX reviewer, SEO optimizer, QA. QA uses Playwright for browser testing
+with screenshots saved to `.forja/screenshots/`.
 
 **API Backend** -- 5 agents: architect, database, backend, security, QA.
-The architect reads `_index.md` first to understand the full context map.
-Security checks domain files for compliance requirements.
+QA uses httpx to test every endpoint against a live server, verifying
+status codes and response bodies.
 
 Custom skills use the default Claude Code Agent Teams without predefined roles.
+
+### Project Configuration (forja.toml)
+
+Per-project settings live in `forja.toml` at the project root. Controls
+build timeouts, model selection, context paths, and observatory behavior.
+Values can be overridden with environment variables (`FORJA_<SECTION>_<KEY>`).
 
 ### Context Engineering
 
@@ -152,19 +167,16 @@ The Context Engine (`forja_context.py`) persists architecture decisions
 across compactions. When Claude's context window fills up and resets,
 decisions survive because they are written to `context/store/` as JSON files.
 
-`_index.md` is auto-generated during init and serves as a map -- agents
-read it first to know which file answers which question.
-
 ### Multi-Model Validation
 
 Claude never reviews its own code. After the build phase, `forja_crossmodel.py`
 sends the output to Kimi or Saptiva for an independent review. This catches
-blind spots that self-review misses. The reviewer returns pass/fail with
-severity-ranked issues.
+blind spots that self-review misses. Providers are tried in a fallback chain:
+Kimi first, then Saptiva.
 
 Before the build even starts, `forja_specreview.py` has Kimi analyze the PRD
 for ambiguities, contradictions, and missing edge cases. Findings are
-automatically appended to the PRD so agents get a cleaner spec.
+automatically appended to the PRD.
 
 ### Learnings System
 
@@ -178,79 +190,72 @@ start with institutional knowledge instead of a blank slate.
 
 ### Observatory Dashboard
 
-A single-file HTML dashboard generated after each run. It reads every
-artifact Forja produced -- spec review, plan, build logs, cross-model
-reports, outcome evaluation, learnings -- and renders them as an
-interactive report.
+A single-file HTML dashboard generated after each run. Includes spec review
+results, build progress, cross-model reports, outcome evaluation, learnings,
+and a per-feature event timeline showing pass/fail/blocked events with
+timestamps.
 
-In live mode, the observatory runs in the background during the build
-and updates in real time so you can watch progress without opening
-Claude Code.
+In live mode, the observatory runs in the background during the build and
+updates in real time.
 
 ```
 .forja/observatory/evals.html
 ```
+
+### Structured Logging
+
+Debug logging available with `--verbose` / `-v`. Output is TTY-aware:
+compact timestamps for interactive use, structured `[LEVEL] name: message`
+format for pipes and CI.
+
+```bash
+forja -v run
+```
+
+### Robustness
+
+- **PID lock file** (`.forja/runner.pid`) prevents concurrent `forja run` executions
+- **Atomic file writes** for `features.json` via temp file + rename
+- **Process group management** ensures child processes are cleaned up on exit or timeout
+- **Template versioning** -- each template carries a `FORJA_TEMPLATE_VERSION` marker.
+  `forja init --upgrade` updates templates in-place without re-running the full setup.
+  Preflight warns when installed templates are outdated.
+- **Per-feature event log** at `.forja/feature-events.jsonl` tracks every attempt,
+  pass, fail, and blocked event with timestamps and cycle counts
+- **Build log capture** at `.forja/logs/build.log`
 
 ---
 
 ## Architecture
 
 ```
-forja CLI
+forja CLI (--verbose)
   |
-  +-- config     ->  config.py       API key management (~/.forja/config.env)
-  +-- init       ->  init.py         Scaffold project + interactive context setup
-  +-- plan       ->  planner.py      God Plan Mode (expert panel via Kimi)
-  +-- run        ->  runner.py       Full pipeline orchestration
-  +-- status     ->  status.py       Feature progress per teammate
-  +-- report     ->  (observatory)   Dashboard generation
+  +-- config     ->  config.py         API key management (~/.forja/config.env)
+  +-- init       ->  init.py           Scaffold project + interactive context setup
+  +-- init --upgrade                   Update templates only
+  +-- plan       ->  planner.py        Plan Mode (expert panel via Kimi)
+  +-- run        ->  runner.py         6-phase pipeline orchestration
+  +-- status     ->  status.py         Feature progress per teammate
+  +-- report     ->  (observatory)     Dashboard generation
+
+Configuration:
+  forja.toml                           Per-project settings (timeouts, models, paths)
+  config_loader.py                     TOML parser + env var overrides
 
 Templates (copied to .forja-tools/ on init):
-  forja_preflight.py     Pre/post-plan validation
-  forja_validator.py     Zero-LLM deterministic file checks (AST, brackets)
-  forja_features.py      Per-teammate feature tracker
-  forja_context.py       Context Engine (persistent decisions)
-  forja_crossmodel.py    Independent code review via Kimi/Saptiva
-  forja_hardening.py     AI-generated edge case testing
-  forja_outcome.py       PRD coverage scoring
-  forja_specreview.py    Pre-build PRD analysis
-  forja_learnings.py     Cross-run learning extraction
-  forja_observatory.py   Metrics dashboard generator
+  forja_preflight.py       Pre/post-plan validation
+  forja_validator.py       Zero-LLM deterministic file checks (AST, brackets)
+  forja_features.py        Per-teammate feature tracker + event log
+  forja_context.py         Context Engine (persistent decisions)
+  forja_crossmodel.py      Independent code review via Kimi/Saptiva
+  forja_hardening.py       AI-generated edge case testing
+  forja_outcome.py         PRD coverage scoring
+  forja_specreview.py      Pre-build PRD analysis
+  forja_learnings.py       Cross-run learning extraction
+  forja_observatory.py     Metrics dashboard + feature event timeline
+  forja_qa_playwright.py   Browser testing for frontend projects
 ```
-
----
-
-## Pipeline Detail
-
-**Phase 0 -- Spec Review.**
-Kimi reads the PRD and returns a list of ambiguities, gaps, and implicit
-assumptions. The runner auto-appends the enrichment to the PRD. This phase
-is informational and never blocks the build.
-
-**Phase 1 -- Context Injection.**
-The runner reads `context/_index.md`, the decision store, the learnings
-manifest, and all business context files. Everything is injected into
-CLAUDE.md under a shared context section so every agent has the same
-information.
-
-**Phase 2 -- Build.**
-Claude Code is spawned with the enriched CLAUDE.md. The lead agent (Head of
-Product) decomposes the PRD into 2-4 epics, generates teammate instructions,
-and launches Agent Teams. Each teammate owns one epic and builds independently.
-A QA teammate runs integration tests. Progress is monitored with a live
-spinner and progress bar. QA has a 12-minute stall timeout at >80% and a
-20-minute absolute timeout so it never blocks indefinitely.
-
-**Phase 3 -- Outcome Evaluation.**
-Kimi compares the PRD requirements against what was actually built.
-Returns a coverage percentage and lists met vs unmet requirements.
-
-**Phase 4 -- Extract Learnings.**
-Patterns from the outcome report, cross-model reviews, and git commits
-are extracted and stored in `context/learnings/` for the next run.
-
-**Phase 5 -- Observatory.**
-All artifacts are collected into a single-file HTML dashboard.
 
 ---
 
@@ -279,6 +284,18 @@ Keys are also loaded from a local `.env` file if present.
 
 ---
 
+## Testing
+
+```bash
+pip install -e .
+pytest
+```
+
+263 tests covering pipeline orchestration, configuration loading, feature
+tracking, security validation, learnings extraction, QA skills, and more.
+
+---
+
 ## Built With
 
 - [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) -- Agent Teams for parallel multi-agent builds
@@ -287,16 +304,9 @@ Keys are also loaded from a local `.env` file if present.
 
 ---
 
-## Results
+## Origin
 
-A typical `forja run` on a landing page PRD produces:
-
-- 4-5 teammates working in parallel
-- Full HTML/CSS/JS site matching the PRD
-- Cross-model code review report
-- PRD coverage score (target: >85%)
-- Learnings extracted for next iteration
-- Observatory dashboard at `.forja/observatory/evals.html`
+Built by [Saptiva AI](https://saptiva.com).
 
 ---
 
