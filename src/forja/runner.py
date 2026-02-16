@@ -28,7 +28,7 @@ from forja.constants import (
 )
 from forja.utils import (
     BOLD, CYAN, DIM, GREEN, RED, YELLOW, RESET,
-    Feature, gather_context, load_dotenv, read_feature_status, safe_read_json,
+    Feature, call_llm, gather_context, load_dotenv, read_feature_status, safe_read_json,
 )
 
 # ── Placeholder detection ────────────────────────────────────────────
@@ -817,6 +817,69 @@ def _run_observatory():
         print(f"  {DIM}report generation failed (non-blocking){RESET}")
 
 
+# ── Iteration changelog ──────────────────────────────────────────────
+
+def _save_iteration_log(pipeline_start: float, total: int, passed: int,
+                        blocked: int, build_elapsed: float) -> None:
+    """Save a markdown changelog to .forja/iterations/run-{N}.md."""
+    iterations_dir = FORJA_DIR / "iterations"
+    iterations_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = sorted(iterations_dir.glob("run-*.md"))
+    run_num = len(existing) + 1
+
+    total_elapsed = time.time() - pipeline_start
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    failed = total - passed - blocked
+    pct = int(passed / total * 100) if total > 0 else 0
+
+    lines = [
+        f"# Run #{run_num}",
+        f"",
+        f"- **Timestamp:** {ts}",
+        f"- **Duration:** {_format_duration(int(total_elapsed))}",
+        f"- **Build time:** {_format_duration(int(build_elapsed))}",
+        f"- **Features:** {passed}/{total} passed, {failed} failed, {blocked} blocked",
+        f"- **Pass rate:** {pct}%",
+    ]
+
+    # Delta vs previous run
+    if existing:
+        try:
+            prev_text = existing[-1].read_text(encoding="utf-8")
+            m = re.search(r"(\d+)/(\d+) passed", prev_text)
+            if m:
+                prev_passed = int(m.group(1))
+                lines.append(f"- **Delta:** {passed - prev_passed:+d} features vs run #{run_num - 1}")
+        except OSError:
+            pass
+
+    # Outcome coverage
+    outcome_path = FORJA_DIR / "outcome-report.json"
+    if outcome_path.exists():
+        try:
+            oc = json.loads(outcome_path.read_text(encoding="utf-8"))
+            lines.append(f"- **Outcome coverage:** {oc.get('coverage', '?')}%")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Learnings count
+    learnings_dir = Path("context/learnings")
+    if learnings_dir.is_dir():
+        count = 0
+        for lf in learnings_dir.glob("*.jsonl"):
+            try:
+                count += sum(1 for ln in lf.read_text(encoding="utf-8").splitlines() if ln.strip())
+            except OSError:
+                pass
+        if count:
+            lines.append(f"- **Learnings:** {count} total")
+
+    path = iterations_dir / f"run-{run_num}.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"  {DIM}iteration log: {path}{RESET}")
+
+
 # ── Main pipeline ────────────────────────────────────────────────────
 
 def _acquire_pid_lock() -> bool:
@@ -951,6 +1014,18 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
             return False
 
         print(f"\n{GREEN}{BOLD}  ✔ Project initialized.{RESET}\n")
+
+    # ── Silent template sync (ensures observatory + tools are up-to-date) ──
+    try:
+        from forja.init import get_template, TEMPLATES
+        for src_name, dest_rel in TEMPLATES:
+            dest = Path(dest_rel)
+            if dest.exists():
+                content = get_template(src_name)
+                if dest.read_text(encoding="utf-8") != content:
+                    dest.write_text(content, encoding="utf-8")
+    except Exception:
+        pass  # Non-critical: template sync failure doesn't block pipeline
 
     prd = Path(prd_path) if prd_path else PRD_PATH
 
@@ -1157,6 +1232,9 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     _phase_header(6, "Observatory Report", 6)
     _run_observatory()
 
+    # ── Save iteration changelog ──
+    _save_iteration_log(pipeline_start, total, passed, blocked, build_elapsed)
+
     # ── Auto-open output ──
     cfg = load_config()
     if cfg.build.auto_open:
@@ -1186,3 +1264,237 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     print()
 
     return build_ok
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# forja iterate — Human Feedback Loop
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _build_iteration_context() -> tuple[str, list[dict]]:
+    """Read outcome report, failed features, and learnings manifest.
+
+    Returns (formatted_context_str, failed_features_list).
+    """
+    sections: list[str] = []
+    failed_features: list[dict] = []
+
+    # ── Failed / blocked features ──
+    if TEAMMATES_DIR.exists():
+        for fj in sorted(TEAMMATES_DIR.glob("*/features.json")):
+            data = safe_read_json(fj)
+            if data is None:
+                continue
+            features = data.get("features", data) if isinstance(data, dict) else data
+            if not isinstance(features, list):
+                continue
+            for fd in features:
+                feat = Feature.from_dict(fd)
+                if feat.status in ("failed", "blocked", "pending"):
+                    failed_features.append({
+                        "id": feat.id,
+                        "description": feat.description or feat.name or feat.id,
+                        "status": feat.status,
+                        "cycles": feat.cycles,
+                    })
+
+    if failed_features:
+        lines = [f"## Failed / Incomplete Features ({len(failed_features)})"]
+        for ff in failed_features:
+            lines.append(f"- [{ff['status'].upper()}] {ff['id']}: {ff['description']}")
+        sections.append("\n".join(lines))
+
+    # ── Outcome report (unmet requirements) ──
+    outcome_path = FORJA_DIR / "outcome-report.json"
+    if outcome_path.exists():
+        try:
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            unmet = outcome.get("unmet", [])
+            coverage = outcome.get("coverage", "?")
+            if unmet:
+                lines = [f"## Unmet Requirements (coverage: {coverage}%)"]
+                for req in unmet:
+                    lines.append(f"- {req}")
+                sections.append("\n".join(lines))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # ── Learnings manifest ──
+    learnings_script = FORJA_TOOLS / "forja_learnings.py"
+    if learnings_script.exists():
+        try:
+            result = subprocess.run(
+                [sys.executable, str(learnings_script), "manifest"],
+                capture_output=True, text=True, timeout=10,
+            )
+            manifest = result.stdout.strip()
+            if manifest and "No learnings" not in manifest:
+                sections.append(f"## Learnings from Previous Runs\n{manifest}")
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    return "\n\n".join(sections) if sections else "No iteration data available.", failed_features
+
+
+def _improve_prd_with_context(prd_text: str, iteration_context: str, user_feedback: str) -> str:
+    """Rewrite the PRD using build results and user feedback. Single LLM call."""
+    prompt = (
+        f"Here is a PRD that produced a partial build:\n\n"
+        f"{prd_text}\n\n"
+        f"## Build Results\n{iteration_context}\n\n"
+        f"## User Feedback\n{user_feedback}\n\n"
+        f"Rewrite the PRD to address these failures. If features stalled, "
+        f"simplify or reduce scope. Incorporate the user's feedback. "
+        f"Keep the same markdown structure. Return ONLY the PRD in markdown, no preamble."
+    )
+    try:
+        result = call_llm(
+            prompt,
+            system=(
+                "You are a PRD editor specializing in scope reduction and iterative improvement. "
+                "When features stall or fail, simplify them — remove complexity, reduce count, "
+                "merge related features. The goal is a PRD that will build successfully. "
+                "Do NOT invent features the user didn't ask for. "
+                "Return ONLY the PRD in markdown."
+            ),
+            provider="anthropic",
+        )
+    except Exception:
+        result = ""
+    if result:
+        text = result.strip()
+        # Strip markdown fences if present
+        if text.startswith("```"):
+            first_nl = text.find("\n")
+            last_fence = text.rfind("```")
+            if first_nl != -1 and last_fence > first_nl:
+                text = text[first_nl + 1:last_fence].strip()
+        return text
+    return prd_text
+
+
+def run_iterate(prd_path: str | None = None) -> bool:
+    """Human feedback loop: review gaps, improve PRD, re-run.
+
+    Called by ``forja iterate``.
+    """
+    from forja.context_setup import _flush_stdin
+    from forja.planner import _interactive_prd_edit
+
+    prd = Path(prd_path) if prd_path else PRD_PATH
+    if not prd.exists() or not prd.read_text(encoding="utf-8").strip():
+        print(f"\n  {RED}No PRD found. Run 'forja run' first to generate one.{RESET}\n")
+        return False
+
+    # Check if there's a previous run
+    has_outcome = (FORJA_DIR / "outcome-report.json").exists()
+    has_features = TEAMMATES_DIR.exists() and any(TEAMMATES_DIR.glob("*/features.json"))
+    if not has_outcome and not has_features:
+        print(f"\n  {RED}No previous run found. Run 'forja run' first.{RESET}\n")
+        return False
+
+    # ── Build iteration context ──
+    iteration_context, failed_features = _build_iteration_context()
+
+    total, passed, blocked = _count_features()
+    failed_count = len(failed_features)
+
+    # ── Print summary ──
+    print()
+    print(f"  {'=' * 40}")
+    print(f"  {BOLD}Iteration Review{RESET}")
+    print(f"  {'=' * 40}")
+    print()
+
+    if total > 0:
+        pct = int(passed / total * 100) if total else 0
+        color = GREEN if pct >= 80 else YELLOW if pct >= 50 else RED
+        print(f"  Last run: {color}{passed}/{total} features ({pct}%){RESET}")
+        print()
+
+    if failed_features:
+        print(f"  {RED}✘ Failed / Incomplete ({failed_count}):{RESET}")
+        for ff in failed_features[:10]:  # Show max 10
+            print(f"    - {ff['id']}: {ff['description'][:60]} ({ff['status'].upper()})")
+        if failed_count > 10:
+            print(f"    ... and {failed_count - 10} more")
+        print()
+
+    # Show unmet requirements
+    outcome_path = FORJA_DIR / "outcome-report.json"
+    if outcome_path.exists():
+        try:
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            unmet = outcome.get("unmet", [])
+            if unmet:
+                print(f"  {YELLOW}Unmet requirements ({len(unmet)}):{RESET}")
+                for req in unmet[:5]:
+                    print(f"    - {req[:70]}")
+                if len(unmet) > 5:
+                    print(f"    ... and {len(unmet) - 5} more")
+                print()
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # ── Options menu ──
+    print(f"  {BOLD}Options:{RESET}")
+    print(f"    {GREEN}(1){RESET} Improve PRD and re-run")
+    print(f"    {CYAN}(2){RESET} Re-run as-is (learnings already applied)")
+    print(f"    {DIM}(3){RESET} Abort")
+    print()
+
+    _flush_stdin()
+    try:
+        choice = input(f"  {BOLD}>{RESET} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+    if choice == "3" or not choice:
+        print(f"\n  {DIM}Aborted.{RESET}\n")
+        return False
+
+    if choice == "1":
+        # ── Collect feedback and improve PRD ──
+        _flush_stdin()
+        try:
+            feedback = input(f"\n  {BOLD}What should change?{RESET} > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+        if not feedback:
+            print(f"  {DIM}No feedback provided, aborting.{RESET}")
+            return False
+
+        prd_text = prd.read_text(encoding="utf-8")
+        print(f"\n  {DIM}Improving PRD...{RESET}")
+        improved = _improve_prd_with_context(prd_text, iteration_context, feedback)
+
+        # ── Show what changed ──
+        print(f"\n  {BOLD}── Improved PRD (preview) ──{RESET}")
+        preview = improved[:800]
+        if len(improved) > 800:
+            preview += "\n..."
+        for line in preview.splitlines():
+            print(f"  {line}")
+
+        # ── Interactive review (reuse planner's edit loop) ──
+        improved = _interactive_prd_edit(improved)
+
+        # ── Save ──
+        prd.write_text(improved + "\n", encoding="utf-8")
+        print(f"\n  {GREEN}PRD saved to {prd}{RESET}")
+
+    elif choice == "2":
+        print(f"\n  {DIM}Re-running with current PRD (learnings applied)...{RESET}")
+    else:
+        print(f"\n  {DIM}Invalid option, aborting.{RESET}\n")
+        return False
+
+    # ── Consolidate learnings before re-run ──
+    _run_learnings_apply()
+
+    # ── Re-run pipeline ──
+    print(f"\n  {BOLD}Starting new run...{RESET}\n")
+    return run_forja(prd_path=str(prd))

@@ -27,7 +27,7 @@ from forja.config import run_config
 from forja.constants import PRD_PATH
 from forja.init import run_init
 from forja.planner import run_plan
-from forja.runner import run_forja
+from forja.runner import run_forja, run_iterate
 from forja.status import show_status
 from forja.utils import VERSION, setup_logging
 
@@ -40,6 +40,7 @@ Forja v{VERSION} - Autonomous Software Factory
 Commands:
   forja init            Set up a new project (scaffolding + Plan Mode)
   forja run             Build the project (spec review \u2192 build \u2192 outcome \u2192 learnings \u2192 observatory)
+  forja iterate         Review failures, improve PRD with feedback, re-run
   forja status          Show feature progress during or after a build
   forja report          Open the observatory dashboard in your browser
   forja config          Configure API keys
@@ -76,6 +77,12 @@ def cmd_plan(args: argparse.Namespace) -> None:
 def cmd_run(args: argparse.Namespace) -> None:
     """Run Forja pipeline."""
     success = run_forja(prd_path=args.prd_path)
+    sys.exit(0 if success else 1)
+
+
+def cmd_iterate(args: argparse.Namespace) -> None:
+    """Review failures, improve PRD, re-run."""
+    success = run_iterate(prd_path=args.prd_path)
     sys.exit(0 if success else 1)
 
 
@@ -145,6 +152,11 @@ def main() -> None:
     p_run = subparsers.add_parser("run", help="Run build pipeline")
     p_run.add_argument("prd_path", nargs="?", default=str(PRD_PATH), help="Path to PRD")
     p_run.set_defaults(func=cmd_run)
+
+    # iterate
+    p_iterate = subparsers.add_parser("iterate", help="Review failures, improve PRD, re-run")
+    p_iterate.add_argument("prd_path", nargs="?", default=str(PRD_PATH), help="Path to PRD")
+    p_iterate.set_defaults(func=cmd_iterate)
 
     # status
     p_status = subparsers.add_parser("status", help="View feature status")
