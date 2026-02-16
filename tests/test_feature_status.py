@@ -1,8 +1,25 @@
 """Tests for feature status enum (replaces passes/blocked booleans)."""
 
 import json
+import sys
+import types
 import pytest
 from pathlib import Path
+
+# ── Shim forja_utils so the template can import ───────────────────────
+_shim = types.ModuleType("forja_utils")
+_shim.PASS_ICON = "+"
+_shim.FAIL_ICON = "x"
+_shim.WARN_ICON = "!"
+_shim.GREEN = ""
+_shim.RED = ""
+_shim.YELLOW = ""
+_shim.DIM = ""
+_shim.BOLD = ""
+_shim.RESET = ""
+from forja.templates.forja_utils import Feature
+_shim.Feature = Feature
+sys.modules.setdefault("forja_utils", _shim)
 
 from forja.templates.forja_features import (
     VALID_STATES,

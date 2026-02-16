@@ -1,4 +1,4 @@
-"""Tests for forja.utils.call_kimi."""
+"""Tests for forja.utils.call_kimi (backward-compat wrapper)."""
 
 import json
 import pytest
@@ -6,15 +6,23 @@ from unittest.mock import patch, MagicMock
 from forja.utils import call_kimi
 
 
-class TestNoApiKey:
-    """Returns None when KIMI_API_KEY is not set."""
+@pytest.fixture(autouse=True)
+def _reset_config():
+    from forja.config_loader import reset_config
+    reset_config()
+    yield
+    reset_config()
 
-    def test_returns_none_without_key(self, monkeypatch):
+
+class TestNoApiKey:
+    """Raises when KIMI_API_KEY is not set."""
+
+    def test_raises_without_key(self, monkeypatch):
         monkeypatch.delenv("KIMI_API_KEY", raising=False)
         # Patch load_dotenv so it doesn't reload the key from ~/.forja/config.env
         with patch("forja.utils.load_dotenv"):
-            result = call_kimi([{"role": "user", "content": "hello"}])
-        assert result is None
+            with pytest.raises(RuntimeError, match="KIMI_API_KEY not set"):
+                call_kimi("hello")
 
 
 class TestSuccessfulCall:
@@ -30,16 +38,16 @@ class TestSuccessfulCall:
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        with patch("forja.utils.urllib.request.urlopen", return_value=mock_response):
-            result = call_kimi([{"role": "user", "content": "hello"}])
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            result = call_kimi("hello")
 
         assert result == "Hello from Kimi!"
 
 
 class TestErrorHandling:
-    """Returns None on various failure modes."""
+    """Raises on various failure modes."""
 
-    def test_http_error_returns_none(self, monkeypatch):
+    def test_http_error_raises(self, monkeypatch):
         monkeypatch.setenv("KIMI_API_KEY", "test-key-123")
 
         import urllib.error
@@ -51,44 +59,16 @@ class TestErrorHandling:
             fp=MagicMock(read=lambda: b"rate limited"),
         )
 
-        with patch("forja.utils.urllib.request.urlopen", side_effect=error):
-            result = call_kimi([{"role": "user", "content": "hello"}])
+        with patch("urllib.request.urlopen", side_effect=error):
+            with pytest.raises(RuntimeError, match="Kimi: HTTP 429"):
+                call_kimi("hello")
 
-        assert result is None
-
-    def test_timeout_returns_none(self, monkeypatch):
+    def test_timeout_raises(self, monkeypatch):
         monkeypatch.setenv("KIMI_API_KEY", "test-key-123")
 
-        with patch("forja.utils.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
-            result = call_kimi([{"role": "user", "content": "hello"}])
-
-        assert result is None
-
-    def test_invalid_json_response_returns_none(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "test-key-123")
-
-        mock_response = MagicMock()
-        mock_response.read.return_value = b"not json"
-        mock_response.__enter__ = lambda s: s
-        mock_response.__exit__ = MagicMock(return_value=False)
-
-        with patch("forja.utils.urllib.request.urlopen", return_value=mock_response):
-            result = call_kimi([{"role": "user", "content": "hello"}])
-
-        assert result is None
-
-    def test_missing_choices_key_returns_none(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "test-key-123")
-
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"data": "no choices"}).encode("utf-8")
-        mock_response.__enter__ = lambda s: s
-        mock_response.__exit__ = MagicMock(return_value=False)
-
-        with patch("forja.utils.urllib.request.urlopen", return_value=mock_response):
-            result = call_kimi([{"role": "user", "content": "hello"}])
-
-        assert result is None
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with pytest.raises(RuntimeError, match="timeout"):
+                call_kimi("hello")
 
 
 class TestRequestPayload:
@@ -113,16 +93,13 @@ class TestRequestPayload:
             mock_resp.__exit__ = MagicMock(return_value=False)
             return mock_resp
 
-        with patch("forja.utils.urllib.request.urlopen", side_effect=mock_urlopen):
-            call_kimi(
-                [{"role": "user", "content": "test"}],
-                temperature=0.5,
-                max_tokens=1000,
-            )
+        with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+            call_kimi("test prompt", system="be helpful")
 
         assert captured_request["method"] == "POST"
         assert "moonshot.ai" in captured_request["url"]
-        assert captured_request["data"]["temperature"] == 0.5
-        assert captured_request["data"]["max_tokens"] == 1000
-        assert captured_request["data"]["messages"] == [{"role": "user", "content": "test"}]
+        assert captured_request["data"]["messages"] == [
+            {"role": "system", "content": "be helpful"},
+            {"role": "user", "content": "test prompt"},
+        ]
         assert "Bearer my-secret-key" in captured_request["headers"].get("Authorization", "")

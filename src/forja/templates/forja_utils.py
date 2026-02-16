@@ -8,10 +8,12 @@ Template scripts import from here instead of duplicating code.
 
 import json
 import os
+import re
 import ssl
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # ── Version ─────────────────────────────────────────────────────────
@@ -35,7 +37,10 @@ WARN_ICON = f"{YELLOW}[WARN]{RESET}"
 # ── LLM constants ───────────────────────────────────────────────────
 
 KIMI_MODEL = "kimi-k2-0711-preview"
+ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
 KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 # ── .env loading ────────────────────────────────────────────────────
 
@@ -45,11 +50,24 @@ _loaded_paths = set()
 def load_dotenv(paths=None):
     """Load environment variables from .env files.
 
-    Reads key=value pairs, strips quotes, sets os.environ (no overwrite).
-    Guards against double-loading the same path.
+    Always loads ~/.forja/config.env first (global config written by
+    forja config), then processes paths.
     """
+    # Load global config first
+    global_config = Path.home() / ".forja" / "config.env"
+    if global_config.exists() and str(global_config) not in _loaded_paths:
+        _loaded_paths.add(str(global_config))
+        for line in global_config.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and value:
+                    os.environ.setdefault(key, value)
+
     if paths is None:
-        paths = [".env", str(Path.home() / ".forja" / "config.env")]
+        paths = [".env"]
 
     loaded = {}
 
@@ -82,21 +100,23 @@ def load_dotenv(paths=None):
 # ── LLM client ──────────────────────────────────────────────────────
 
 
-def call_kimi(messages, temperature=0.6, max_tokens=4096, timeout=60):
-    """Call Kimi (Moonshot AI) chat completion API.
-
-    Returns response text content, or None on any failure.
-    """
+def _call_kimi_raw(prompt, system, model):
+    """Call Kimi API. Raises on failure for auto-fallback."""
     load_dotenv()
     api_key = os.environ.get("KIMI_API_KEY", "")
     if not api_key:
-        return None
+        raise RuntimeError("KIMI_API_KEY not set")
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
 
     payload = json.dumps({
-        "model": KIMI_MODEL,
+        "model": model,
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        "temperature": 0.6,
+        "max_tokens": 4096,
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -112,25 +132,155 @@ def call_kimi(messages, temperature=0.6, max_tokens=4096, timeout=60):
 
     try:
         ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return body["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
         error_body = ""
         try:
-            error_body = e.read().decode("utf-8", errors="replace")
-        except Exception as exc:
-            print(f"  reading Kimi error body: {exc}", file=sys.stderr)
-        print(f"  {RED}Kimi: HTTP {e.code} {e.reason}{RESET}", file=sys.stderr)
-        if error_body:
-            print(f"  {DIM}{error_body[:200]}{RESET}", file=sys.stderr)
-        return None
+            error_body = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f"Kimi: HTTP {e.code} {error_body}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        print(f"  {RED}Kimi timeout/network: {e}{RESET}", file=sys.stderr)
-        return None
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        print(f"  {RED}Kimi: unexpected response format{RESET}", file=sys.stderr)
-        return None
+        raise RuntimeError(f"Kimi timeout/network: {e}") from e
+
+
+def _call_anthropic_raw(prompt, system, model):
+    """Call Anthropic API. Raises on failure for auto-fallback."""
+    load_dotenv()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+    body_dict = {
+        "model": model,
+        "max_tokens": 1500,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if system:
+        body_dict["system"] = system
+
+    payload = json.dumps(body_dict).encode("utf-8")
+
+    req = urllib.request.Request(
+        ANTHROPIC_API_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "User-Agent": f"Forja/{VERSION}",
+        },
+        method="POST",
+    )
+
+    try:
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            text_parts = [
+                block["text"]
+                for block in data.get("content", [])
+                if block.get("type") == "text"
+            ]
+            if not text_parts:
+                raise RuntimeError("Empty response from Anthropic")
+            return "\n".join(text_parts)
+    except urllib.error.HTTPError as e:
+        error_body = ""
+        try:
+            error_body = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f"Anthropic: HTTP {e.code} {error_body}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise RuntimeError(f"Anthropic timeout/network: {e}") from e
+
+
+def _call_openai_raw(prompt, system, model):
+    """Call OpenAI API. Raises on failure for auto-fallback."""
+    load_dotenv()
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 4096,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        OPENAI_API_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": f"Forja/{VERSION}",
+        },
+        method="POST",
+    )
+
+    try:
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return body["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        error_body = ""
+        try:
+            error_body = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f"OpenAI: HTTP {e.code} {error_body}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise RuntimeError(f"OpenAI timeout/network: {e}") from e
+
+
+def _call_provider(prompt, system, provider, model):
+    """Dispatch to the appropriate provider's raw function."""
+    if provider == "kimi":
+        return _call_kimi_raw(prompt, system, model or KIMI_MODEL)
+    elif provider == "anthropic":
+        return _call_anthropic_raw(prompt, system, model or ANTHROPIC_MODEL)
+    elif provider == "openai":
+        return _call_openai_raw(prompt, system, model or os.environ.get("OPENAI_MODEL", "gpt-4o"))
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+def call_llm(prompt, system="", provider="auto", model=None):
+    """Call an LLM provider.
+
+    provider can be 'kimi', 'anthropic', 'openai', or 'auto'.
+    Auto tries kimi first, falls back to anthropic, then openai.
+    """
+    if provider == "auto":
+        for p in ["kimi", "anthropic", "openai"]:
+            try:
+                return _call_provider(prompt, system, p, model)
+            except Exception:
+                continue
+        return ""
+    return _call_provider(prompt, system, provider, model)
+
+
+# Backward-compatible wrappers
+
+def call_kimi(prompt, system=""):
+    """Call Kimi provider. Wrapper around call_llm."""
+    return call_llm(prompt, system, provider="kimi")
+
+
+def call_anthropic(prompt, system=""):
+    """Call Anthropic provider. Wrapper around call_llm."""
+    return call_llm(prompt, system, provider="anthropic")
 
 
 def call_provider(provider, messages, timeout=30):
@@ -217,23 +367,19 @@ def parse_json(text):
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Step 3: strip markdown code blocks
+    # Step 3: extract from LAST code-fenced block (LLMs put the real answer last)
     if "```" in text:
-        start = text.find("```")
-        end = text.rfind("```")
-        if start != end:
-            inner = text[start:end]
-            first_nl = inner.find("\n")
-            stripped = inner[first_nl + 1:] if first_nl != -1 else inner[3:]
-            bs2 = stripped.find("{")
-            be2 = stripped.rfind("}")
+        blocks = re.findall(r'```(?:\w+)?\s*\n(.*?)```', text, re.DOTALL)
+        for block in reversed(blocks):
+            bs2 = block.find("{")
+            be2 = block.rfind("}")
             if bs2 != -1 and be2 > bs2:
                 try:
-                    result = json.loads(stripped[bs2:be2 + 1])
+                    result = json.loads(block[bs2:be2 + 1])
                     if isinstance(result, dict):
                         return result
                 except (json.JSONDecodeError, ValueError):
-                    pass
+                    continue
 
     # Step 4: give up
     return None
@@ -281,6 +427,100 @@ def extract_content(response):
         return None
 
 
+# ── Feature dataclass ──────────────────────────────────────────────
+
+
+@dataclass
+class Feature:
+    """Typed representation of a feature from features.json.
+
+    Use ``Feature.from_dict(d)`` to deserialize from JSON dicts.
+    Use ``feat.to_dict()`` to serialize back for JSON writing.
+    """
+
+    id: str
+    description: str = ""
+    status: str = "pending"  # pending | passed | failed | blocked
+    cycles: int = 0
+    created_at: str = None
+    passed_at: str = None
+    blocked_at: str = None
+    name: str = None  # Legacy fallback for description
+    _teammate: str = field(default=None, repr=False)
+    _extra: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, d):
+        """Deserialize from a JSON dict, handling legacy boolean schema."""
+        status = d.get("status")
+        if status not in ("pending", "passed", "failed", "blocked"):
+            if d.get("blocked"):
+                status = "blocked"
+            elif d.get("passes") or d.get("passed"):
+                status = "passed"
+            elif d.get("cycles", 0) > 0:
+                status = "failed"
+            else:
+                status = "pending"
+
+        known_keys = {
+            "id", "description", "status", "cycles",
+            "created_at", "passed_at", "blocked_at",
+            "name", "_teammate",
+            "blocked", "passes", "passed",
+        }
+        extra = {k: v for k, v in d.items() if k not in known_keys}
+
+        return cls(
+            id=d.get("id", ""),
+            description=d.get("description", d.get("name", "")),
+            status=status,
+            cycles=d.get("cycles", 0),
+            created_at=d.get("created_at"),
+            passed_at=d.get("passed_at"),
+            blocked_at=d.get("blocked_at"),
+            name=d.get("name"),
+            _teammate=d.get("_teammate"),
+            _extra=extra,
+        )
+
+    def to_dict(self):
+        """Serialize to a JSON-safe dict.
+
+        Omits None values and internal fields (_teammate, _extra)
+        to keep features.json clean.  Extra fields are re-merged so
+        unknown keys survive round-trips.
+        """
+        d = {"id": self.id}
+        if self.description:
+            d["description"] = self.description
+        d["status"] = self.status
+        d["cycles"] = self.cycles
+        if self.created_at is not None:
+            d["created_at"] = self.created_at
+        if self.passed_at is not None:
+            d["passed_at"] = self.passed_at
+        if self.blocked_at is not None:
+            d["blocked_at"] = self.blocked_at
+        d.update(self._extra)
+        return d
+
+    @property
+    def is_terminal(self):
+        """True if the feature is in a terminal state (blocked or passed)."""
+        return self.status in ("blocked", "passed")
+
+    @property
+    def can_retry(self):
+        """True if the feature can be attempted again."""
+        return not self.is_terminal
+
+    @property
+    def display_name(self):
+        """Return the best human-readable name for this feature."""
+        return self.description or self.name or self.id
+
+
 # ── Feature status ─────────────────────────────────────────────────
 
 
@@ -289,17 +529,10 @@ def read_feature_status(feat):
 
     Handles both the new string ``status`` field and the legacy boolean
     ``passes``/``blocked`` fields for backward compatibility.
+    Also accepts a Feature instance directly.
 
     Returns one of: "pending", "passed", "failed", "blocked".
     """
-    status = feat.get("status")
-    if status in ("pending", "passed", "failed", "blocked"):
-        return status
-    # Fallback: old boolean schema
-    if feat.get("blocked"):
-        return "blocked"
-    if feat.get("passes") or feat.get("passed"):
-        return "passed"
-    if feat.get("cycles", 0) > 0:
-        return "failed"
-    return "pending"
+    if isinstance(feat, Feature):
+        return feat.status
+    return Feature.from_dict(feat).status

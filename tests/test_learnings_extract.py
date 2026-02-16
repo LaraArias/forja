@@ -23,6 +23,8 @@ _shim.YELLOW = ""
 _shim.DIM = ""
 _shim.BOLD = ""
 _shim.RESET = ""
+from forja.templates.forja_utils import Feature
+_shim.Feature = Feature
 sys.modules.setdefault("forja_utils", _shim)
 
 from forja.templates.forja_learnings import (

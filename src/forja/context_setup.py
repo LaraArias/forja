@@ -16,7 +16,7 @@ from forja.utils import (
     RESET,
     PASS_ICON,
     WARN_ICON,
-    call_kimi,
+    call_llm,
     load_dotenv,
     parse_json,
 )
@@ -150,16 +150,13 @@ def _setup_company(target: Path) -> tuple[str | None, str | None]:
 
     if not docs_path or not Path(docs_path).exists():
         print(f"  {DIM}Generating company overview...{RESET}")
-        messages = [
-            {"role": "system", "content": "You respond only with the requested content. No preamble."},
-            {"role": "user", "content": (
-                f"Generate a concise company overview for a software project. "
-                f"Company: {name}. Description: {desc}. "
-                f"Include: what the company does, target market, key differentiators, tech philosophy. "
-                f"Max 30 lines markdown."
-            )},
-        ]
-        raw = call_kimi(messages)
+        raw = call_llm(
+            f"Generate a concise company overview for a software project. "
+            f"Company: {name}. Description: {desc}. "
+            f"Include: what the company does, target market, key differentiators, tech philosophy. "
+            f"Max 30 lines markdown.",
+            system="You respond only with the requested content. No preamble.",
+        )
         if raw:
             overview = AUTO_HEADER + raw.strip() + "\n"
         else:
@@ -201,28 +198,24 @@ def _setup_domain(target: Path, name: str, desc: str) -> str | None:
     obj_text = "\n".join(f"- {o}" for o in objections) if objections else "- None specified"
 
     print(f"  {DIM}Generating domain context...{RESET}")
-    messages = [
-        {"role": "system", "content": "You are a domain expert. Respond only with valid JSON."},
-        {"role": "user", "content": (
-            f"Generate domain context files for a {audience_label} software project.\n"
-            f"Company: {name} - {desc}\n"
-            f"Audience: {audience_label}\n"
-            f"Value prop: {value_prop}\n"
-            f"Objections:\n{obj_text}\n\n"
-            f"Generate 3 files as JSON:\n"
-            f'{{\n'
-            f'  "domain_md": "DOMAIN.md content - bounded context with: primary driver, '
-            f'audience table (roles + top concerns), competitor benchmarks (generic for this industry), '
-            f'anti-patterns (what NOT to do/say), key messages. Max 40 lines.",\n'
-            f'  "value_props_md": "value-props.md content - main value prop expanded + 3 secondary props '
-            f'with proof points and quotes per audience role. Max 50 lines.",\n'
-            f'  "objections_md": "objections.md content - each objection with response strategy '
-            f'and supporting data points. Max 30 lines."\n'
-            f'}}'
-        )},
-    ]
-
-    raw = call_kimi(messages)
+    raw = call_llm(
+        f"Generate domain context files for a {audience_label} software project.\n"
+        f"Company: {name} - {desc}\n"
+        f"Audience: {audience_label}\n"
+        f"Value prop: {value_prop}\n"
+        f"Objections:\n{obj_text}\n\n"
+        f"Generate 3 files as JSON:\n"
+        f'{{\n'
+        f'  "domain_md": "DOMAIN.md content - bounded context with: primary driver, '
+        f'audience table (roles + top concerns), competitor benchmarks (generic for this industry), '
+        f'anti-patterns (what NOT to do/say), key messages. Max 40 lines.",\n'
+        f'  "value_props_md": "value-props.md content - main value prop expanded + 3 secondary props '
+        f'with proof points and quotes per audience role. Max 50 lines.",\n'
+        f'  "objections_md": "objections.md content - each objection with response strategy '
+        f'and supporting data points. Max 30 lines."\n'
+        f'}}',
+        system="You are a domain expert. Respond only with valid JSON.",
+    )
     if raw:
         data = parse_json(raw)
         if data:
@@ -365,18 +358,15 @@ def _setup_design_system(target: Path, name: str) -> None:
 
     # Generate DESIGN-REFERENCE.md via Kimi
     print(f"  {DIM}Generating design reference...{RESET}")
-    messages = [
-        {"role": "system", "content": "You respond only with the requested content. No preamble."},
-        {"role": "user", "content": (
-            f"Generate a design reference guide for a {style_label} landing page. "
-            f"Primary color: {primary}. Secondary/accent: {secondary}. Font: {font}. "
-            f"Include: color palette with CSS variables, typography scale, layout patterns "
-            f"(section structure), component patterns (buttons, cards, navigation), "
-            f"spacing rules, illustration style recommendations, list of things NOT to do. "
-            f"Format as markdown. Max 80 lines."
-        )},
-    ]
-    raw = call_kimi(messages)
+    raw = call_llm(
+        f"Generate a design reference guide for a {style_label} landing page. "
+        f"Primary color: {primary}. Secondary/accent: {secondary}. Font: {font}. "
+        f"Include: color palette with CSS variables, typography scale, layout patterns "
+        f"(section structure), component patterns (buttons, cards, navigation), "
+        f"spacing rules, illustration style recommendations, list of things NOT to do. "
+        f"Format as markdown. Max 80 lines.",
+        system="You respond only with the requested content. No preamble.",
+    )
     if raw:
         ref_content = AUTO_HEADER + raw.strip() + "\n"
     else:
@@ -540,4 +530,3 @@ def interactive_context_setup(target: Path, skill_name: str | None) -> None:
 
     print(f"  {GREEN}Index:{RESET} _index.md")
     print(f"\n  {DIM}You can replace any auto-generated file with your own.{RESET}")
-    print(f"  {BOLD}Run 'forja plan' to refine the PRD with expert review.{RESET}")

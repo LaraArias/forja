@@ -38,6 +38,34 @@ def check(condition, label):
     return False
 
 
+# ── Config env loading ────────────────────────────────────────────
+
+_env_loaded = False
+
+
+def _load_config_env():
+    """Load API keys from ~/.forja/config.env and .env into os.environ.
+
+    forja_preflight.py runs standalone (no forja.utils available),
+    so it must load config sources itself before checking API keys.
+    """
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+
+    for env_path in [Path.home() / ".forja" / "config.env", Path(".env")]:
+        if env_path.exists():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and value:
+                        os.environ.setdefault(key, value)
+
+
 # ── API key smoke tests ──────────────────────────────────────────
 
 def _check_kimi_api_key():
@@ -138,6 +166,7 @@ def _check_template_versions():
 
 def preflight_pre():
     """Validate environment before Forja starts."""
+    _load_config_env()
     print("=== Preflight: pre-launch ===\n")
     ok = True
 

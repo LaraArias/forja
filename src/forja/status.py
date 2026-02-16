@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from forja.constants import CLAUDE_MD, FORJA_TOOLS, TEAMMATES_DIR
-from forja.utils import FAIL_ICON, PASS_ICON, WARN_ICON, read_feature_status
+from forja.utils import FAIL_ICON, PASS_ICON, WARN_ICON, Feature, read_feature_status
 
 
 def _check_project() -> bool:
@@ -96,11 +96,12 @@ def show_status() -> bool:
         tm_blocked = 0
         tm_failed = 0
 
-        for feat in features:
-            fid = feat.get("id", "?")
-            desc = feat.get("description", "")
-            feat_status = read_feature_status(feat)
-            cycles = feat.get("cycles", 0)
+        for feat_dict in features:
+            feat = Feature.from_dict(feat_dict)
+            fid = feat.id or "?"
+            desc = feat.description
+            feat_status = feat.status
+            cycles = feat.cycles
 
             total += 1
             cycle_label = "cycle" if cycles == 1 else "cycles"

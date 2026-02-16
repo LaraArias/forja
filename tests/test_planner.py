@@ -10,11 +10,11 @@ from pathlib import Path
 class TestPlannerSharedUtilities:
     """Verify planner uses shared utilities at runtime."""
 
-    def test_planner_has_call_kimi(self):
-        """Planner should use the shared call_kimi client."""
+    def test_planner_has_call_llm(self):
+        """Planner should use the shared call_llm client."""
         import forja.planner as planner
-        assert hasattr(planner, "call_kimi")
-        assert callable(planner.call_kimi)
+        assert hasattr(planner, "call_llm")
+        assert callable(planner.call_llm)
 
     def test_planner_has_parse_json(self):
         """Planner should use shared JSON parsing."""
@@ -120,3 +120,38 @@ class TestTechnicalExpert:
         # No changes — Software Architect matches "architect" keyword
         assert len(new_experts) == 3
         assert len(new_questions) == len(FALLBACK_QUESTIONS)
+
+
+class TestDesignExpert:
+    """Verify _ensure_design_expert adds a design expert for UI projects."""
+
+    def test_design_expert_added_for_ui_project(self):
+        """PRD mentioning 'React dashboard' should get a design expert."""
+        from forja.planner import _ensure_design_expert
+        experts = [
+            {"name": "Software Architect", "field": "Backend Architecture"},
+            {"name": "Security Engineer", "field": "Security"},
+            {"name": "PM", "field": "Product Strategy"},
+        ]
+        prd = "Build a React dashboard for real-time analytics."
+        result = _ensure_design_expert(experts, prd)
+        assert any(
+            "design" in e.get("field", "").lower() or "ux" in e.get("field", "").lower()
+            for e in result
+        ), "Design expert should be present for UI project"
+        assert result[1]["name"] == "Design Systems Expert"
+
+    def test_design_expert_not_added_for_cli(self):
+        """PRD for a CLI tool should NOT get a design expert."""
+        from forja.planner import _ensure_design_expert
+        experts = [
+            {"name": "Software Architect", "field": "System Design"},
+            {"name": "Security Engineer", "field": "Security"},
+            {"name": "PM", "field": "Product Strategy"},
+        ]
+        prd = "Build a CLI tool for parsing log files and generating reports."
+        result = _ensure_design_expert(experts, prd)
+        assert not any(
+            e.get("name") == "Design Systems Expert" for e in result
+        ), "No design expert should be added for CLI project"
+        assert len(result) == 3

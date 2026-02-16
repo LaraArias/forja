@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from forja_utils import PASS_ICON as PASS, FAIL_ICON as FAIL, WARN_ICON as WARN
+from forja_utils import PASS_ICON as PASS, FAIL_ICON as FAIL, WARN_ICON as WARN, Feature
 
 OBSERVATORY_DIR = Path(".forja") / "observatory"
 
@@ -221,47 +221,65 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
     per_teammate = {}
     for t in teammates:
         name = t["teammate"]
-        feats = t["features"]
-        passed = [f for f in feats if f.get("status") == "passed"]
-        blocked = [f for f in feats if f.get("status") == "blocked"]
-        failed = [f for f in feats if f.get("status") not in ("passed", "blocked")]
+        feats = [Feature.from_dict(f) for f in t["features"]]
+        passed = [f for f in feats if f.status == "passed"]
+        blocked = [f for f in feats if f.status == "blocked"]
+        failed = [f for f in feats if f.status not in ("passed", "blocked")]
         per_teammate[name] = {
             "total": len(feats),
             "passed": len(passed),
             "blocked": len(blocked),
             "failed": len(failed),
         }
-        all_features.extend([{**f, "_teammate": name} for f in feats])
+        for f in feats:
+            f._teammate = name
+        all_features.extend(feats)
 
     total_features = len(all_features)
-    total_passed = sum(1 for f in all_features if f.get("status") == "passed")
-    total_blocked = sum(1 for f in all_features if f.get("status") == "blocked")
+    total_passed = sum(1 for f in all_features if f.status == "passed")
+    total_blocked = sum(1 for f in all_features if f.status == "blocked")
     total_failed = total_features - total_passed - total_blocked
 
-    cycles_list = [f.get("cycles", 0) for f in all_features if f.get("cycles", 0) > 0]
+    cycles_list = [f.cycles for f in all_features if f.cycles > 0]
     avg_cycles = round(sum(cycles_list) / len(cycles_list), 1) if cycles_list else 0
 
     # Per-feature cycle data
     feature_cycles = []
     for f in all_features:
         feature_cycles.append({
-            "id": f.get("id", "?"),
-            "teammate": f.get("_teammate", "?"),
-            "cycles": f.get("cycles", 0),
-            "passed": f.get("status") == "passed",
-            "blocked": f.get("status") == "blocked",
-            "description": f.get("description", ""),
-            "created_at": f.get("created_at", ""),
-            "passed_at": f.get("passed_at", ""),
+            "id": f.id or "?",
+            "teammate": f._teammate or "?",
+            "cycles": f.cycles,
+            "status": f.status,
+            "passed": f.status == "passed",
+            "blocked": f.status == "blocked",
+            "description": f.description,
+            "created_at": f.created_at or "",
+            "passed_at": f.passed_at or "",
+        })
+
+    # Roadmap data grouped by teammate
+    roadmap = []
+    for t in teammates:
+        name = t["teammate"]
+        feats = [Feature.from_dict(f) for f in t["features"]]
+        roadmap.append({
+            "teammate": name,
+            "features": [
+                {"id": f.id or "?", "description": f.description, "status": f.status}
+                for f in feats
+            ],
+            "passed": sum(1 for f in feats if f.status == "passed"),
+            "total": len(feats),
         })
 
     # Timeline data (teammate start/end)
     teammate_timeline = []
     for t in teammates:
         name = t["teammate"]
-        feats = t["features"]
-        created_dates = [f.get("created_at", "") for f in feats if f.get("created_at")]
-        passed_dates = [f.get("passed_at", "") for f in feats if f.get("passed_at")]
+        feats = [Feature.from_dict(f) for f in t["features"]]
+        created_dates = [f.created_at for f in feats if f.created_at]
+        passed_dates = [f.passed_at for f in feats if f.passed_at]
         start = min(created_dates) if created_dates else ""
         end = max(passed_dates) if passed_dates else ""
         teammate_timeline.append({"name": name, "start": start, "end": end})
@@ -341,6 +359,8 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
         "total_commits": len(commits), "commits": commits[:20],
         # Feature events timeline
         "feature_events": feature_events or [],
+        # Roadmap
+        "roadmap": roadmap,
     }
 
 
@@ -382,12 +402,26 @@ def _esc(s):
 
 # ── HTML dashboard ───────────────────────────────────────────────────
 
-def _generate_html(metrics, all_runs, live_mode=False, elapsed_seconds=0):
-    """Generate full pipeline dashboard HTML."""
-    m = metrics
+def _load_html_template():
+    """Load observatory_template.html from the same directory as this script."""
+    # Try alongside this script (works both in package and .forja-tools/)
+    here = Path(__file__).parent / "observatory_template.html"
+    if here.exists():
+        return here.read_text(encoding="utf-8")
+    # Fallback: .forja-tools/ directory (runtime context)
+    tools = Path(".forja-tools") / "observatory_template.html"
+    if tools.exists():
+        return tools.read_text(encoding="utf-8")
+    raise FileNotFoundError(
+        "observatory_template.html not found next to forja_observatory.py "
+        "or in .forja-tools/. Run 'forja init --upgrade' to fix."
+    )
 
-    # ── Prepare JSON data for embedding ──
-    dashboard_data = {
+
+def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=0):
+    """Build the JSON-serializable dict embedded into the HTML template."""
+    m = metrics
+    return {
         "per_teammate": m["per_teammate"],
         "feature_cycles": m["feature_cycles"],
         "teammate_timeline": m["teammate_timeline"],
@@ -429,584 +463,30 @@ def _generate_html(metrics, all_runs, live_mode=False, elapsed_seconds=0):
         "live_mode": live_mode, "elapsed_seconds": elapsed_seconds,
         # Feature event timeline
         "feature_events": m["feature_events"][:200],
+        # Roadmap
+        "roadmap": m["roadmap"],
     }
+
+
+def _generate_html(metrics, all_runs, live_mode=False, elapsed_seconds=0):
+    """Generate full pipeline dashboard HTML from external template."""
+    template = _load_html_template()
+
+    dashboard_data = _prepare_dashboard_data(metrics, all_runs, live_mode, elapsed_seconds)
     data_json = json.dumps(dashboard_data, ensure_ascii=False)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    auto_refresh = '<meta http-equiv="refresh" content="5">' if live_mode else ''
 
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-{auto_refresh}
-<title>Forja Observatory{' [LIVE]' if live_mode else ''}</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-:root {{
-  --bg: #0f172a; --surface: #1e293b; --border: #334155;
-  --text: #e2e8f0; --dim: #94a3b8;
-  --accent: #00E5B0; --success: #22c55e; --warning: #eab308; --error: #ef4444;
-  --blue: #60a5fa; --purple: #a78bfa; --cyan: #22d3ee;
-}}
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  background:var(--bg); color:var(--text); padding:24px; min-height:100vh; }}
-h1 {{ font-size:1.8rem; margin-bottom:4px;
-  background:linear-gradient(135deg,var(--accent),var(--cyan));
-  -webkit-background-clip:text; -webkit-text-fill-color:transparent; }}
-.subtitle {{ color:var(--dim); margin-bottom:24px; font-size:.9rem; }}
-.section {{ margin-bottom:36px; }}
-.section-title {{ font-size:1.3rem; font-weight:700; margin-bottom:16px;
-  padding-left:12px; border-left:3px solid var(--accent); color:var(--text); }}
+    # Replace placeholders
+    html = template.replace("/*DATA_JSON*/null", data_json)
+    html = html.replace(
+        "<!--LIVE_META-->",
+        '<meta http-equiv="refresh" content="5">' if live_mode else "",
+    )
+    html = html.replace("<!--LIVE_TITLE-->", " [LIVE]" if live_mode else "")
+    html = html.replace("<!--GENERATED_AT-->", generated_at)
 
-/* Pipeline summary cards */
-.pipeline {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:24px; }}
-.pipe-card {{ background:var(--surface); border:1px solid var(--border); border-radius:10px;
-  padding:16px 20px; flex:1; min-width:180px; position:relative; overflow:hidden; }}
-.pipe-card::before {{ content:''; position:absolute; top:0; left:0; right:0; height:3px; }}
-.pipe-card.s-pass::before {{ background:var(--success); }}
-.pipe-card.s-fail::before {{ background:var(--error); }}
-.pipe-card.s-skip::before {{ background:var(--border); }}
-.pipe-card .pipe-name {{ font-size:.75rem; color:var(--dim); margin-bottom:6px;
-  text-transform:uppercase; letter-spacing:.5px; }}
-.pipe-card .pipe-badge {{ display:inline-block; font-size:.65rem; font-weight:700;
-  padding:2px 8px; border-radius:4px; margin-bottom:6px; text-transform:uppercase; }}
-.badge-pass {{ background:rgba(34,197,94,.15); color:var(--success); }}
-.badge-fail {{ background:rgba(239,68,68,.15); color:var(--error); }}
-.badge-skip {{ background:rgba(148,163,184,.1); color:var(--dim); }}
-.pipe-card .pipe-detail {{ font-size:.85rem; color:var(--text); }}
-
-/* Grid layouts */
-.grid-2 {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:20px; }}
-.grid-3 {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }}
-.panel {{ background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; }}
-.panel h2 {{ font-size:1rem; color:var(--dim); margin-bottom:14px; border-bottom:1px solid var(--border);
-  padding-bottom:8px; }}
-.panel canvas {{ max-height:300px; }}
-
-/* Mini stat cards */
-.build-stats {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin-bottom:20px; }}
-.mini-stat {{ background:var(--surface); border:1px solid var(--border); border-radius:8px;
-  padding:12px; text-align:center; }}
-.mini-stat .val {{ font-size:1.4rem; font-weight:700; }}
-.mini-stat .lbl {{ color:var(--dim); font-size:.72rem; margin-top:2px; text-transform:uppercase; }}
-.mini-stat.accent .val {{ color:var(--accent); }}
-.mini-stat.green .val {{ color:var(--success); }}
-.mini-stat.blue .val {{ color:var(--blue); }}
-
-/* Tables */
-table {{ width:100%; border-collapse:collapse; font-size:.83rem; }}
-th {{ text-align:left; padding:8px; border-bottom:2px solid var(--border); color:var(--dim);
-  font-size:.72rem; text-transform:uppercase; letter-spacing:.5px; }}
-td {{ padding:8px; border-bottom:1px solid var(--border); }}
-
-/* Severity badges inline */
-.sev {{ display:inline-block; font-size:.65rem; font-weight:700; padding:2px 8px;
-  border-radius:4px; text-transform:uppercase; min-width:55px; text-align:center; }}
-.sev-high {{ background:rgba(239,68,68,.15); color:var(--error); }}
-.sev-medium {{ background:rgba(234,179,8,.15); color:var(--warning); }}
-.sev-low {{ background:rgba(148,163,184,.1); color:var(--dim); }}
-
-/* Tag badges */
-.tag {{ display:inline-block; font-size:.65rem; font-weight:700; padding:2px 8px;
-  border-radius:4px; text-transform:uppercase; min-width:75px; text-align:center; }}
-.tag-FACT {{ background:rgba(34,197,94,.15); color:var(--success); }}
-.tag-DECISION {{ background:rgba(96,165,250,.15); color:var(--blue); }}
-.tag-ASSUMPTION {{ background:rgba(234,179,8,.15); color:var(--warning); }}
-
-/* Expert cards */
-.experts {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }}
-.expert-card {{ background:var(--bg); border:1px solid var(--border); border-radius:8px;
-  padding:14px; flex:1; min-width:200px; }}
-.expert-card .exp-name {{ font-weight:600; color:var(--accent); font-size:.9rem; }}
-.expert-card .exp-field {{ color:var(--dim); font-size:.78rem; margin:4px 0; }}
-.expert-card .exp-persp {{ font-size:.8rem; color:var(--text); opacity:.85; line-height:1.4; }}
-
-/* Outcome bar */
-.progress-track {{ background:var(--border); border-radius:6px; height:24px; overflow:hidden; margin:8px 0; }}
-.progress-fill {{ height:100%; border-radius:6px; transition:width .3s; }}
-.progress-label {{ font-size:.8rem; color:var(--dim); margin-top:4px; }}
-
-/* Requirement lists */
-.req-cols {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:12px; }}
-.req-list {{ list-style:none; padding:0; }}
-.req-list li {{ padding:5px 0; font-size:.82rem; display:flex; align-items:flex-start; gap:6px; }}
-.req-list .icon-met {{ color:var(--success); flex-shrink:0; }}
-.req-list .icon-unmet {{ color:var(--error); flex-shrink:0; }}
-
-/* Assumption density bar */
-.density-bar {{ display:flex; height:28px; border-radius:6px; overflow:hidden; margin:8px 0; }}
-.density-bar .seg {{ display:flex; align-items:center; justify-content:center;
-  font-size:.7rem; font-weight:600; color:#0f172a; }}
-
-/* Learnings list */
-.learning-group {{ margin-bottom:16px; }}
-.learning-group h3 {{ font-size:.85rem; color:var(--accent); margin-bottom:8px;
-  text-transform:capitalize; }}
-.learning-entry {{ padding:6px 0; font-size:.82rem; display:flex; gap:8px; align-items:flex-start;
-  border-bottom:1px solid rgba(51,65,85,.5); }}
-.learning-entry:last-child {{ border-bottom:none; }}
-
-/* No-data placeholder */
-.no-data {{ color:var(--dim); font-size:.85rem; text-align:center; padding:24px;
-  font-style:italic; }}
-.no-data::before {{ content:'\\2014  '; }}
-
-/* Info box */
-.info-box {{ background:rgba(0,229,176,.06); border:1px solid rgba(0,229,176,.2);
-  border-radius:8px; padding:14px 18px; font-size:.82rem; color:var(--dim); line-height:1.5; }}
-.info-box strong {{ color:var(--accent); }}
-
-/* Live banner */
-.live-banner {{ background:rgba(0,229,176,.1); border:1px solid rgba(0,229,176,.3);
-  border-radius:10px; padding:14px 20px; margin-bottom:24px;
-  display:flex; align-items:center; gap:14px; flex-wrap:wrap; }}
-.live-dot {{ width:10px; height:10px; border-radius:50%; background:var(--accent);
-  animation:pulse 1.5s ease-in-out infinite; flex-shrink:0; }}
-@keyframes pulse {{ 0%,100%{{opacity:1}} 50%{{opacity:.3}} }}
-.live-banner .live-label {{ font-weight:700; color:var(--accent); font-size:.9rem; }}
-.live-banner .live-info {{ color:var(--dim); font-size:.82rem; }}
-.live-banner .live-elapsed {{ font-family:monospace; color:var(--text); font-size:1rem;
-  font-weight:600; margin-left:auto; }}
-
-/* Footer */
-.footer {{ text-align:center; color:var(--dim); font-size:.72rem; margin-top:40px;
-  padding-top:16px; border-top:1px solid var(--border); }}
-
-@media (max-width:600px) {{
-  .grid-2 {{ grid-template-columns:1fr; }}
-  .grid-3 {{ grid-template-columns:1fr; }}
-  .pipeline {{ flex-direction:column; }}
-  .build-stats {{ grid-template-columns:repeat(2,1fr); }}
-  .req-cols {{ grid-template-columns:1fr; }}
-  body {{ padding:12px; }}
-}}
-</style>
-</head>
-<body>
-
-<h1>Forja Observatory</h1>
-<p class="subtitle">Full pipeline metrics dashboard</p>
-
-<!-- All sections rendered by JS from embedded data -->
-<div id="app"></div>
-
-<script>
-const D = {data_json};
-
-// ── Helpers ──
-const esc = s => String(s).replace(/&/g,'&amp;').replace(/\\x3c/g,'&lt;').replace(/>/g,'&gt;');
-const sevClass = s => ({{high:'sev-high',medium:'sev-medium',low:'sev-low'}})[String(s).toLowerCase()]||'sev-low';
-const badgeCls = s => s==='pass'?'badge-pass':s==='fail'?'badge-fail':'badge-skip';
-const cardCls = s => s==='pass'?'s-pass':s==='fail'?'s-fail':'s-skip';
-const badgeText = s => s==='pass'?'PASS':s==='fail'?'FAIL':'SKIPPED';
-const fmtTime = m => m>=60?Math.floor(m/60)+'h '+(m%60)+'m':m+'m';
-const pctColor = p => p>=80?'var(--success)':p>=60?'var(--warning)':'var(--error)';
-const cycleColor = c => c<=1?'#22c55e':c<=2?'#eab308':'#ef4444';
-
-// ── Section builders ──
-function buildPipeline() {{
-  const phases = [
-    {{name:'Spec Review', status:D.sr_status,
-      detail: D.sr_status!=='skip'
-        ? `${{D.sr_gaps}} gaps found, ${{D.sr_enrichments}} enrichments added`
-        : 'No data'}},
-    {{name:'Plan Mode', status:D.plan_status,
-      detail: D.plan_status!=='skip'
-        ? `${{D.plan_experts.length}} experts, ${{D.plan_answers.length}} questions, ${{D.plan_facts}} FACT / ${{D.plan_decisions}} DECISION / ${{D.plan_assumptions}} ASSUMPTION`
-        : 'Skipped'}},
-    {{name:'Build', status:D.build_status,
-      detail: D.build_status!=='skip'
-        ? `${{D.total_passed}}/${{D.total_features}} passed` + (D.total_blocked > 0 ? `, ${{D.total_blocked}} blocked` : '') + `, ${{D.num_teammates}} teams, ${{fmtTime(D.total_time_minutes)}}`
-        : 'No data'}},
-    {{name:'Outcome', status:D.outcome_status,
-      detail: D.outcome_status!=='skip'
-        ? `${{D.outcome_coverage}}% coverage`
-        : 'Skipped'}},
-    {{name:'Learnings', status:D.learnings_status,
-      detail: D.learnings_status!=='skip'
-        ? `${{D.learnings_total}} total (${{D.learnings_high}} high, ${{D.learnings_med}} medium, ${{D.learnings_low}} low)`
-        : 'None'}},
-  ];
-  let html = '<div class="section"><div class="section-title">Pipeline Summary</div><div class="pipeline">';
-  for (const p of phases) {{
-    html += `<div class="pipe-card ${{cardCls(p.status)}}">
-      <div class="pipe-name">${{p.name}}</div>
-      <span class="pipe-badge ${{badgeCls(p.status)}}">${{badgeText(p.status)}}</span>
-      <div class="pipe-detail">${{p.detail}}</div>
-    </div>`;
-  }}
-  // Outcome progress bar inside pipeline
-  if (D.outcome_status !== 'skip') {{
-    const oc = D.outcome_coverage;
-    phases[3].detail += '';  // already set above
-  }}
-  html += '</div>';
-  // Outcome inline progress bar
-  if (D.outcome_status !== 'skip') {{
-    const oc = D.outcome_coverage;
-    html += `<div style="max-width:600px;margin:0 0 20px;">
-      <div class="progress-track"><div class="progress-fill" style="width:${{oc}}%;background:${{pctColor(oc)}}"></div></div>
-      <div class="progress-label">${{oc}}% outcome coverage &mdash; ${{D.outcome_met.length}} met, ${{D.outcome_unmet.length}} unmet</div>
-    </div>`;
-  }}
-  html += '</div>';
-  return html;
-}}
-
-function buildBuildDetails() {{
-  let html = '<div class="section"><div class="section-title">Build Details</div>';
-
-  // Mini stat cards
-  html += '<div class="build-stats">';
-  html += `<div class="mini-stat green"><div class="val">${{D.total_passed}}/${{D.total_features}}</div><div class="lbl">Passed</div></div>`;
-  if (D.total_blocked > 0) html += `<div class="mini-stat" style="border-color:#f59e0b"><div class="val" style="color:#f59e0b">${{D.total_blocked}}</div><div class="lbl">Blocked</div></div>`;
-  html += `<div class="mini-stat accent"><div class="val">${{D.avg_cycles}}</div><div class="lbl">Avg Cycles</div></div>`;
-  html += `<div class="mini-stat blue"><div class="val">${{D.total_files}}</div><div class="lbl">Total Files</div></div>`;
-  html += `<div class="mini-stat blue"><div class="val">${{D.total_lines.toLocaleString()}}</div><div class="lbl">Lines of Code</div></div>`;
-  html += `<div class="mini-stat accent"><div class="val">${{D.total_commits}}</div><div class="lbl">Commits</div></div>`;
-  html += '</div>';
-
-  const tmKeys = Object.keys(D.per_teammate);
-  if (tmKeys.length === 0) {{
-    html += '<div class="panel"><div class="no-data">No build data available</div></div>';
-  }} else {{
-    html += '<div class="grid-2">';
-    html += '<div class="panel"><h2>Features by Teammate</h2><canvas id="chartTeammate"></canvas></div>';
-    html += '<div class="panel"><h2>Cycles per Feature</h2><canvas id="chartCycles"></canvas></div>';
-    html += '</div>';
-  }}
-
-  // Code Generated table
-  const exts = Object.entries(D.src_stats).sort((a,b)=>b[1].lines-a[1].lines);
-  if (exts.length > 0) {{
-    html += '<div style="margin-top:20px"><div class="panel"><h2>Code Generated</h2><table>';
-    html += '<thead><tr><th>Extension</th><th>Files</th><th>Lines</th></tr></thead><tbody>';
-    for (const [ext, info] of exts) {{
-      html += `<tr><td>${{esc(ext)}}</td><td>${{info.files}}</td><td>${{info.lines.toLocaleString()}}</td></tr>`;
-    }}
-    html += '</tbody></table></div></div>';
-  }}
-
-  html += '</div>';
-  return html;
-}}
-
-function buildValidation() {{
-  let html = '<div class="section"><div class="section-title">Validation</div><div class="grid-2">';
-
-  // Cross-model findings
-  html += '<div class="panel"><h2>Cross-Model Findings</h2>';
-  if (D.crossmodel_issues.length === 0) {{
-    html += '<div class="no-data">Cross-model review not run</div>';
-  }} else {{
-    html += `<p style="color:var(--dim);font-size:.8rem;margin-bottom:10px">${{D.crossmodel_issues.length}} issues (${{D.cm_high}} high, ${{D.cm_med}} medium, ${{D.cm_low}} low)</p>`;
-    html += '<table><thead><tr><th>Severity</th><th>File</th><th>Description</th></tr></thead><tbody>';
-    for (const issue of D.crossmodel_issues.slice(0,20)) {{
-      const sev = (issue.severity||'low').toLowerCase();
-      html += `<tr><td><span class="sev ${{sevClass(sev)}}">${{sev.toUpperCase()}}</span></td>`;
-      html += `<td>${{esc(issue.file||'?')}}</td>`;
-      html += `<td>${{esc(issue.description||issue.message||'?')}}</td></tr>`;
-    }}
-    html += '</tbody></table>';
-  }}
-  html += '</div>';
-
-  // Outcome requirements
-  html += '<div class="panel"><h2>Outcome Requirements</h2>';
-  if (D.outcome_status === 'skip') {{
-    html += '<div class="no-data">Outcome evaluation not run</div>';
-  }} else {{
-    html += '<div class="req-cols">';
-    // Met
-    html += '<div><h3 style="color:var(--success);font-size:.85rem;margin-bottom:8px">Met</h3><ul class="req-list">';
-    if (D.outcome_met.length === 0) html += '<li style="color:var(--dim)">None</li>';
-    for (const r of D.outcome_met.slice(0,15)) {{
-      html += `<li><span class="icon-met">&#10003;</span>${{esc(r)}}</li>`;
-    }}
-    html += '</ul></div>';
-    // Unmet
-    html += '<div><h3 style="color:var(--error);font-size:.85rem;margin-bottom:8px">Unmet</h3><ul class="req-list">';
-    if (D.outcome_unmet.length === 0) html += '<li style="color:var(--dim)">None</li>';
-    for (const r of D.outcome_unmet.slice(0,15)) {{
-      html += `<li><span class="icon-unmet">&#10007;</span>${{esc(r)}}</li>`;
-    }}
-    html += '</ul></div>';
-    html += '</div>';
-  }}
-  html += '</div></div></div>';
-  return html;
-}}
-
-function buildIntelligence() {{
-  let html = '<div class="section"><div class="section-title">Intelligence</div>';
-
-  // Plan Mode Expert Panel
-  html += '<div class="panel" style="margin-bottom:20px">';
-  html += '<h2>Plan Mode &mdash; Expert Panel</h2>';
-  if (D.plan_status === 'skip') {{
-    html += '<div class="no-data">Plan mode was not run</div>';
-  }} else {{
-    // Expert cards
-    html += '<div class="experts">';
-    for (const exp of D.plan_experts.slice(0,3)) {{
-      html += `<div class="expert-card">
-        <div class="exp-name">${{esc(exp.name||'?')}}</div>
-        <div class="exp-field">${{esc(exp.field||'')}}</div>
-        <div class="exp-persp">${{esc(exp.perspective||'')}}</div>
-      </div>`;
-    }}
-    html += '</div>';
-
-    // Q&A table
-    html += `<h3 style="font-size:.9rem;color:var(--dim);margin:14px 0 8px">Questions &amp; Answers (${{D.plan_answers.length}})</h3>`;
-    if (D.plan_answers.length > 0) {{
-      html += '<table><thead><tr><th>Tag</th><th>Expert</th><th>Question</th><th>Answer</th></tr></thead><tbody>';
-      for (const a of D.plan_answers) {{
-        const tag = a.tag||'?';
-        html += `<tr><td><span class="tag tag-${{tag}}">${{tag}}</span></td>`;
-        html += `<td>${{esc(a.expert||'?')}}</td>`;
-        html += `<td>${{esc(a.question||'?')}}</td>`;
-        html += `<td>${{esc(String(a.answer||'').substring(0,150))}}</td></tr>`;
-      }}
-      html += '</tbody></table>';
-    }}
-
-    // Assumption Density bar
-    const total_qa = D.plan_facts + D.plan_decisions + D.plan_assumptions;
-    if (total_qa > 0) {{
-      const pF = (D.plan_facts/total_qa*100).toFixed(0);
-      const pD = (D.plan_decisions/total_qa*100).toFixed(0);
-      const pA = (D.plan_assumptions/total_qa*100).toFixed(0);
-      html += `<h3 style="font-size:.9rem;color:var(--dim);margin:14px 0 8px">Assumption Density</h3>`;
-      html += `<div class="density-bar">`;
-      if (D.plan_facts>0) html += `<div class="seg" style="width:${{pF}}%;background:var(--success)">${{pF}}% FACT</div>`;
-      if (D.plan_decisions>0) html += `<div class="seg" style="width:${{pD}}%;background:var(--blue)">${{pD}}% DECISION</div>`;
-      if (D.plan_assumptions>0) html += `<div class="seg" style="width:${{pA}}%;background:var(--warning)">${{pA}}% ASSUMPTION</div>`;
-      html += '</div>';
-    }}
-  }}
-  html += '</div>';
-
-  // Learnings for next run
-  html += '<div class="panel" style="margin-bottom:20px">';
-  html += '<h2>Learnings for Next Run</h2>';
-  const catKeys = Object.keys(D.learnings_by_cat);
-  if (catKeys.length === 0) {{
-    html += '<div class="no-data">No learnings extracted</div>';
-  }} else {{
-    for (const cat of catKeys) {{
-      html += `<div class="learning-group"><h3>${{esc(cat)}}</h3>`;
-      for (const entry of D.learnings_by_cat[cat].slice(0,10)) {{
-        const sev = (entry.severity||'medium').toLowerCase();
-        html += `<div class="learning-entry">
-          <span class="sev ${{sevClass(sev)}}">${{sev.toUpperCase()}}</span>
-          <span>${{esc(entry.learning)}}</span>
-        </div>`;
-      }}
-      html += '</div>';
-    }}
-  }}
-  html += '</div>';
-
-  html += '</div>';
-  return html;
-}}
-
-function buildProgress() {{
-  let html = '<div class="section"><div class="section-title">Progress Tracking</div>';
-
-  // Teammate timeline
-  const tl = D.teammate_timeline.filter(t=>t.start);
-  if (tl.length > 0) {{
-    html += '<div class="panel" style="margin-bottom:20px"><h2>Teammate Timeline</h2>';
-    html += '<canvas id="chartTimeline"></canvas></div>';
-  }}
-
-  // Feature event timeline
-  const evts = D.feature_events || [];
-  if (evts.length > 0) {{
-    html += '<div class="panel" style="margin-bottom:20px"><h2>Feature Event Timeline</h2>';
-    html += '<table><thead><tr><th>Time</th><th>Feature</th><th>Event</th><th>Cycle</th><th>Reason</th></tr></thead><tbody>';
-    for (const ev of evts) {{
-      const ts = ev.timestamp ? ev.timestamp.substring(11,19) : '?';
-      const evtCls = ev.event==='passed'?'color:var(--success)':ev.event==='blocked'?'color:var(--warning)':'color:var(--error)';
-      html += `<tr><td style="font-family:monospace;color:var(--dim)">${{ts}}</td>`;
-      html += `<td>${{esc(ev.feature||'?')}}</td>`;
-      html += `<td style="${{evtCls}};font-weight:600">${{esc(ev.event||'?')}}</td>`;
-      html += `<td>${{ev.cycle||0}}</td>`;
-      html += `<td style="color:var(--dim);font-size:.8rem">${{esc(ev.reason||'')}}</td></tr>`;
-    }}
-    html += '</tbody></table></div>';
-  }}
-
-  // Quality over time
-  if (D.all_runs.length > 1) {{
-    html += '<div class="panel" style="margin-bottom:20px"><h2>Quality Over Time</h2>';
-    html += '<canvas id="chartDelta"></canvas></div>';
-  }}
-
-  // Explanation
-  html += `<div class="info-box">
-    <strong>How progress is measured:</strong> Progress is measured by feature completion, not time estimation.
-    Each feature has a validation spec that must pass. The percentage shows
-    <code>features_passed / features_total</code>. The runner polls features.json every 2 seconds
-    to track completion in real time.
-  </div>`;
-
-  html += '</div>';
-  return html;
-}}
-
-function buildLiveBanner() {{
-  if (!D.live_mode) return '';
-  const secs = D.elapsed_seconds;
-  const h = Math.floor(secs/3600);
-  const m = Math.floor((secs%3600)/60);
-  const s = secs%60;
-  const elapsed = h>0 ? `${{h}}h ${{m}}m ${{s}}s` : m>0 ? `${{m}}m ${{s}}s` : `${{s}}s`;
-  const total = D.total_features;
-  const passed = D.total_passed;
-  const blocked = D.total_blocked || 0;
-  const resolved = passed + blocked;
-  const pct = total>0 ? Math.round(resolved/total*100) : 0;
-  // Count active vs done teammates
-  const tmKeys = Object.keys(D.per_teammate);
-  const done = tmKeys.filter(k=>(D.per_teammate[k].passed+(D.per_teammate[k].blocked||0))===D.per_teammate[k].total && D.per_teammate[k].total>0);
-  const active = tmKeys.filter(k=>(D.per_teammate[k].passed+(D.per_teammate[k].blocked||0))<D.per_teammate[k].total && D.per_teammate[k].total>0);
-  const waiting = tmKeys.length - done.length - active.length;
-  let teamInfo = '';
-  if (active.length>0) teamInfo += `${{active.length}} active`;
-  if (done.length>0) teamInfo += (teamInfo?', ':'')+`${{done.length}} done`;
-  if (waiting>0) teamInfo += (teamInfo?', ':'')+`${{waiting}} waiting`;
-  const blockedInfo = blocked > 0 ? `, ${{blocked}} blocked` : '';
-  return `<div class="live-banner">
-    <div class="live-dot"></div>
-    <div>
-      <div class="live-label">LIVE &mdash; Build in progress</div>
-      <div class="live-info">${{passed}}/${{total}} passed${{blockedInfo}} (${{pct}}% resolved) &mdash; Teams: ${{teamInfo||'starting...'}}</div>
-    </div>
-    <div class="live-elapsed">${{elapsed}}</div>
-  </div>`;
-}}
-
-// ── Render all sections ──
-const app = document.getElementById('app');
-app.innerHTML = buildLiveBanner() + buildPipeline() + buildBuildDetails() + buildValidation()
-  + buildIntelligence() + buildProgress()
-  + `<div class="footer">Generated by Forja Observatory &mdash; {generated_at}</div>`;
-
-// ── Charts ──
-Chart.defaults.color = '#94a3b8';
-Chart.defaults.borderColor = '#334155';
-
-// Features by Teammate (stacked bar)
-const tmKeys = Object.keys(D.per_teammate);
-if (tmKeys.length > 0 && document.getElementById('chartTeammate')) {{
-  new Chart(document.getElementById('chartTeammate'), {{
-    type: 'bar',
-    data: {{
-      labels: tmKeys,
-      datasets: [
-        {{ label: 'Passed', data: tmKeys.map(k=>D.per_teammate[k].passed), backgroundColor: '#22c55e' }},
-        {{ label: 'Blocked', data: tmKeys.map(k=>D.per_teammate[k].blocked||0), backgroundColor: '#f59e0b' }},
-        {{ label: 'Failed', data: tmKeys.map(k=>D.per_teammate[k].failed), backgroundColor: '#ef4444' }}
-      ]
-    }},
-    options: {{
-      responsive: true,
-      plugins: {{ legend: {{ position: 'top' }} }},
-      scales: {{ x: {{ stacked: true }}, y: {{ stacked: true, beginAtZero: true, ticks: {{ stepSize: 1 }} }} }}
-    }}
-  }});
-}}
-
-// Cycles per Feature
-const fc = D.feature_cycles;
-if (fc.length > 0 && document.getElementById('chartCycles')) {{
-  new Chart(document.getElementById('chartCycles'), {{
-    type: 'bar',
-    data: {{
-      labels: fc.map(f=>f.id),
-      datasets: [{{
-        label: 'Cycles',
-        data: fc.map(f=>f.cycles),
-        backgroundColor: fc.map(f=>cycleColor(f.cycles))
-      }}]
-    }},
-    options: {{
-      responsive: true,
-      plugins: {{ legend: {{ display: false }} }},
-      scales: {{ y: {{ beginAtZero: true, ticks: {{ stepSize: 1 }} }} }}
-    }}
-  }});
-}}
-
-// Teammate Timeline (horizontal bar)
-const tl = D.teammate_timeline.filter(t=>t.start);
-if (tl.length > 0 && document.getElementById('chartTimeline')) {{
-  const parseT = s => {{ try {{ return new Date(s).getTime() }} catch {{ return null }} }};
-  const allTimes = tl.flatMap(t=>[parseT(t.start),parseT(t.end)]).filter(Boolean);
-  const minT = Math.min(...allTimes)||0;
-  const maxT = Math.max(...allTimes)||1;
-  const range = maxT - minT || 1;
-  const starts = tl.map(t => {{ const s=parseT(t.start); return s?((s-minT)/range*100):0; }});
-  const durations = tl.map(t => {{
-    const s=parseT(t.start),e=parseT(t.end);
-    return (s&&e)?((e-s)/range*100):0;
-  }});
-  new Chart(document.getElementById('chartTimeline'), {{
-    type: 'bar',
-    data: {{
-      labels: tl.map(t=>t.name),
-      datasets: [
-        {{ label: 'offset', data: starts, backgroundColor: 'transparent', borderWidth: 0 }},
-        {{ label: 'Duration', data: durations, backgroundColor: '#00E5B0' }}
-      ]
-    }},
-    options: {{
-      responsive: true, indexAxis: 'y',
-      plugins: {{ legend: {{ display: false }},
-        tooltip: {{ callbacks: {{ label: ctx=>ctx.datasetIndex===1?ctx.raw.toFixed(1)+'% of total':'' }} }} }},
-      scales: {{ x: {{ stacked: true, display: false }}, y: {{ stacked: true }} }}
-    }}
-  }});
-}}
-
-// Quality Over Time (line chart)
-if (D.all_runs.length > 1 && document.getElementById('chartDelta')) {{
-  new Chart(document.getElementById('chartDelta'), {{
-    type: 'line',
-    data: {{
-      labels: D.all_runs.map(r=>r.timestamp.substring(0,10)),
-      datasets: [
-        {{ label: 'Features Passed', data: D.all_runs.map(r=>r.total_passed),
-          borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,.1)', fill: true,
-          tension: 0.3, yAxisID: 'y' }},
-        {{ label: 'Outcome Coverage %', data: D.all_runs.map(r=>r.outcome_coverage),
-          borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,.1)', fill: true,
-          tension: 0.3, yAxisID: 'y1' }}
-      ]
-    }},
-    options: {{
-      responsive: true,
-      plugins: {{ legend: {{ position: 'top' }} }},
-      scales: {{
-        y: {{ beginAtZero: true, position: 'left', title: {{ display: true, text: 'Features' }} }},
-        y1: {{ beginAtZero: true, position: 'right', max: 100,
-          title: {{ display: true, text: '%' }}, grid: {{ drawOnChartArea: false }} }}
-      }}
-    }}
-  }});
-}}
-__SCRIPT_END__
-</body>
-</html>"""
-    # Escape </ inside script block so browser doesn't break on </div> etc.
+    # Escape </ inside <script> so browser doesn't break on </div> etc.
     # Standard practice: </ -> <\/ inside <script> (valid JS, safe HTML).
-    html = html.replace("__SCRIPT_END__", "</script>")
-    # Find the script block (the second <script> — first is Chart.js CDN)
     idx1 = html.index("<script>", html.index("chart.js"))
     idx2 = html.index("</script>", idx1)
     script_body = html[idx1 + 8:idx2]

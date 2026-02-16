@@ -19,7 +19,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from forja_utils import PASS_ICON, FAIL_ICON, WARN_ICON, GREEN, RED, YELLOW, DIM, BOLD, RESET
+from forja_utils import PASS_ICON, FAIL_ICON, WARN_ICON, GREEN, RED, YELLOW, DIM, BOLD, RESET, Feature
 
 LEARNINGS_DIR = Path("context/learnings")
 
@@ -332,11 +332,11 @@ def cmd_extract():
             features = data.get("features", data) if isinstance(data, dict) else data
             if not isinstance(features, list):
                 continue
-            for f in features:
-                cycles = f.get("cycles", 0)
-                if cycles > 2:
-                    desc = f.get("description", f.get("name", f.get("id", "?")))
-                    learning = _infer_error_pattern_action(desc, teammate, cycles)
+            for f_dict in features:
+                feat = Feature.from_dict(f_dict)
+                if feat.cycles > 2:
+                    desc = feat.display_name
+                    learning = _infer_error_pattern_action(desc, teammate, feat.cycles)
                     _try_append("error-pattern", learning,
                                 f"features.json/{teammate}", "medium",
                                 existing, counts)

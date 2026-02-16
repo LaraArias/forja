@@ -28,8 +28,8 @@ from forja.utils import (
     RED,
     YELLOW,
     RESET,
-    call_kimi,
-    call_anthropic,
+    _call_anthropic_raw,
+    call_llm,
     gather_context,
     load_dotenv,
     parse_json,
@@ -50,7 +50,11 @@ FALLBACK_EXPERTS = [
 TECHNICAL_EXPERT = {
     "name": "Build Feasibility Engineer",
     "field": "Build Tooling & Runtime Constraints",
-    "perspective": "Evaluating whether this project can actually be built autonomously by Claude Code with pip/npm dependencies.",
+    "perspective": (
+        "You have VETO POWER over the tech stack. If the PRD specifies ANY technology "
+        "that Claude Code cannot install (Redis, PostgreSQL, Docker, system services), "
+        "you MUST override it. Your suggestion is not optional - it is a hard constraint."
+    ),
 }
 
 FALLBACK_QUESTIONS = [
@@ -67,14 +71,27 @@ FALLBACK_QUESTIONS = [
 TECHNICAL_QUESTIONS = [
     {
         "expert_name": "Build Feasibility Engineer",
-        "question": "What tech stack is viable given that Claude Code builds this autonomously in a single session?",
-        "why": "Claude Code has context limits and can only install packages via pip/npm. Exotic stacks or multi-service architectures will fail.",
+        "question": (
+            "STACK OVERRIDE CHECK: Does the PRD specify any technology Claude Code cannot install? "
+            "I must rewrite the Stack section to ONLY include pip/npm packages, SQLite, and built-in features."
+        ),
+        "why": (
+            "Claude Code can only install packages via pip/npm. It CANNOT install Redis, PostgreSQL, "
+            "MySQL, Docker, Kafka, RabbitMQ, Nginx, or any system service. If found, I will override: "
+            "Redis -> Python dict + SQLite, PostgreSQL/MySQL -> SQLite via SQLAlchemy, "
+            "Docker -> direct pip install, Socket.io+Redis -> in-memory adapter, "
+            "Next.js ISR -> plain HTML + vanilla JS or Flask templates."
+        ),
         "default": "Python + FastAPI + SQLite (single-process, pip-installable, no Docker needed).",
     },
     {
         "expert_name": "Build Feasibility Engineer",
         "question": "What external dependencies are needed and are they all installable via pip or npm?",
-        "why": "Claude Code cannot install system-level packages (apt, brew). Every dependency must be pip/npm installable.",
+        "why": (
+            "Claude Code cannot install system-level packages (apt, brew). Every dependency must be "
+            "pip/npm installable. When I detect an incompatible stack: "
+            "'STACK OVERRIDE: Replacing {original} with {alternative}. Reason: {reason}.'"
+        ),
         "default": "All deps via pip. No system packages, no Docker, no external databases.",
     },
     {
@@ -89,6 +106,7 @@ TECHNICAL_QUESTIONS = [
 
 def _call_claude_research(expert_name, expert_field, topic, prd_summary):
     """Call Claude API with web search tool for expert research."""
+    from forja.config_loader import load_config
     user_content = (
         f"You are {expert_name}, {expert_field}. "
         f"Research this topic for a software project: {topic}\n\n"
@@ -98,12 +116,15 @@ def _call_claude_research(expert_name, expert_field, topic, prd_summary):
         f"would - with specific recommendations for this project. "
         f"Be concise, max 3 paragraphs."
     )
-    return call_anthropic(
-        messages=[{"role": "user", "content": user_content}],
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        max_tokens=1500,
-        timeout=90,
-    )
+    try:
+        return _call_anthropic_raw(
+            user_content,
+            system="",
+            model=load_config().models.anthropic_model,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        )
+    except Exception:
+        return None
 
 
 # ── PRD from scratch ───────────────────────────────────────────────
@@ -131,23 +152,55 @@ Return JSON:
 """
 
 
+def _read_existing_context() -> str | None:
+    """Read context files created by context_setup and build a description.
+
+    Returns a project description string, or None if no context exists.
+    """
+    parts: list[str] = []
+
+    # Company overview
+    overview_path = CONTEXT_DIR / "company" / "company-overview.md"
+    if overview_path.exists():
+        text = overview_path.read_text(encoding="utf-8").strip()
+        # Strip auto-generated header comment
+        lines = [l for l in text.splitlines()
+                 if not l.startswith("<!--") and not l.startswith("-->")]
+        text = "\n".join(lines).strip()
+        if text:
+            parts.append(text)
+
+    # Domain files: audience, value-props, objections
+    domains_dir = CONTEXT_DIR / "domains"
+    if domains_dir.is_dir():
+        for domain in sorted(domains_dir.iterdir()):
+            if not domain.is_dir():
+                continue
+            for fname in ("DOMAIN.md", "value-props.md", "objections.md"):
+                fpath = domain / fname
+                if fpath.exists():
+                    text = fpath.read_text(encoding="utf-8").strip()
+                    lines = [l for l in text.splitlines()
+                             if not l.startswith("<!--") and not l.startswith("-->")]
+                    text = "\n".join(lines).strip()
+                    if text:
+                        parts.append(text)
+
+    if not parts:
+        return None
+
+    return "\n\n".join(parts)
+
+
 def _generate_prd_from_idea(user_idea):
     """Call Kimi to generate a structured PRD from a project idea.
 
     Returns (prd_markdown, title) or (None, None) on failure.
     """
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a senior product manager. Respond only with valid JSON.",
-        },
-        {
-            "role": "user",
-            "content": PRD_FROM_IDEA_PROMPT.format(user_idea=user_idea),
-        },
-    ]
-
-    raw = call_kimi(messages, temperature=0.6)
+    raw = call_llm(
+        PRD_FROM_IDEA_PROMPT.format(user_idea=user_idea),
+        system="You are a senior product manager. Respond only with valid JSON.",
+    )
     if not raw:
         return None, None
 
@@ -187,8 +240,11 @@ def _generate_prd_from_idea(user_idea):
     return md.strip(), title
 
 
-def _scratch_flow():
-    """Interactive flow to create a PRD from scratch.
+def _scratch_flow(existing_context: str | None = None):
+    """Interactive flow to create a PRD from scratch (or from existing context).
+
+    When *existing_context* is provided (from context_setup), the "Describe
+    your project idea" prompt is skipped and the context is used directly.
 
     Returns (prd_content, should_continue_to_expert_panel) or (None, False) on abort.
     """
@@ -196,20 +252,28 @@ def _scratch_flow():
 
     print()
     print(f"{BOLD}  ── Forja Plan Mode ──{RESET}")
-    print(f"  No PRD found. Let's create one from scratch.")
+    print(f"  Let's enrich your PRD with expert review.")
     print()
 
-    while True:
-        print(f"  {BOLD}Describe your project idea (2-3 sentences):{RESET}")
-        try:
-            idea = input(f"  {BOLD}>{RESET} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return None, False
+    # If context already exists from context_setup, use it directly
+    if existing_context:
+        idea = existing_context
+        print(f"  {DIM}Using project context from setup...{RESET}")
+    else:
+        idea = None
 
-        if not idea:
-            print(f"  {RED}Please enter a project description.{RESET}")
-            continue
+    while True:
+        if idea is None:
+            print(f"  {BOLD}Describe your project idea (2-3 sentences):{RESET}")
+            try:
+                idea = input(f"  {BOLD}>{RESET} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return None, False
+
+            if not idea:
+                print(f"  {RED}Please enter a project description.{RESET}")
+                continue
 
         # Call Kimi to generate PRD
         print(f"\n  {DIM}Generating PRD draft...{RESET}")
@@ -250,7 +314,8 @@ def _scratch_flow():
             return prd_content, True
 
         elif choice == "2":
-            # Loop back to ask for description again
+            # Loop back to ask for description again (reset idea so prompt shows)
+            idea = None
             print()
             continue
 
@@ -322,6 +387,8 @@ IMPORTANT: At least one of the 3 experts MUST focus on implementation feasibilit
 someone who can evaluate whether the tech stack is realistic, whether dependencies
 are pip/npm installable, and whether the scope fits a single autonomous build session.
 
+If the project has a user interface, one expert MUST be a UX/Design expert who asks about: visual hierarchy, color accessibility WCAG AA, responsive breakpoints, interaction patterns, and design system consistency.
+
 For each expert:
 1. Have them speak in their authentic voice about what concerns them about this PRD
 2. Have them ask ONE critical question that must be answered before building
@@ -384,6 +451,26 @@ def _ensure_technical_expert(
         questions.append({**tq, "id": next_id + i})
 
     return experts, questions
+
+
+def _ensure_design_expert(experts: list, prd_text: str) -> list:
+    """Add a design expert when the PRD describes a UI project."""
+    ui_keywords = [
+        "frontend", "ui", "web", "landing", "dashboard", "game", "mobile",
+        "react", "html", "css", "canvas", "drag", "drop", "theme", "responsive",
+    ]
+    has_ui = any(kw in prd_text.lower() for kw in ui_keywords)
+    has_design = any(
+        "design" in e.get("field", "").lower() or "ux" in e.get("field", "").lower()
+        for e in experts
+    )
+    if has_ui and not has_design:
+        experts.insert(1, {
+            "name": "Design Systems Expert",
+            "field": "UX Design & Visual Systems",
+            "perspective": "Accessible, consistent, performant interfaces",
+        })
+    return experts
 
 
 # ── Core flow ───────────────────────────────────────────────────────
@@ -484,25 +571,15 @@ def _do_research(expert_name, topic, prd_summary, experts=None):
         print()
         return
 
-    # Fallback: Kimi without web search
+    # Fallback: any provider without web search
     print(f"  {YELLOW}Web search unavailable, using expert knowledge only{RESET}")
-    messages = [
-        {
-            "role": "system",
-            "content": f"You are {expert_name}, a domain expert. Answer concisely with concrete data and a clear recommendation.",
-        },
-        {
-            "role": "user",
-            "content": (
-                f"The project context: {prd_summary}\n\n"
-                f"Research topic: {topic}\n\n"
-                f"Respond as {expert_name} would: with specific data, benchmarks, "
-                f"and a concrete recommendation. Keep it under 200 words."
-            ),
-        },
-    ]
-
-    raw = call_kimi(messages, temperature=0.5)
+    raw = call_llm(
+        f"The project context: {prd_summary}\n\n"
+        f"Research topic: {topic}\n\n"
+        f"Respond as {expert_name} would: with specific data, benchmarks, "
+        f"and a concrete recommendation. Keep it under 200 words.",
+        system=f"You are {expert_name}, a domain expert. Answer concisely with concrete data and a clear recommendation.",
+    )
     if raw:
         print()
         for line in raw.strip().splitlines():
@@ -512,7 +589,77 @@ def _do_research(expert_name, topic, prd_summary, experts=None):
         print(f"  {RED}Could not research (no model available){RESET}")
 
 
-def _generate_enriched_prd(prd_content, qa_transcript, experts):
+def _collect_design_context() -> str:
+    """Ask the user 3 optional design questions and write context files.
+
+    Returns a design context string for inclusion in the enriched PRD prompt,
+    or empty string if nothing was collected.
+    """
+    design_dir = CONTEXT_DIR / "design-system"
+    design_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n{BOLD}── Design Context (optional, Enter to skip) ──{RESET}\n")
+
+    try:
+        ref = input("  Reference URL or screenshot path (Enter to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        ref = ""
+    if ref:
+        (design_dir / "references.md").write_text(
+            f"# Visual References\n\n- {ref}\n", encoding="utf-8",
+        )
+
+    try:
+        colors = input("  Brand colors - primary, secondary, accent (Enter for auto): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        colors = ""
+    if colors:
+        (design_dir / "colors.md").write_text(
+            f"# Color Palette\n\n{colors}\n", encoding="utf-8",
+        )
+    else:
+        (design_dir / "colors.md").write_text(
+            "# Color Palette\n\n"
+            "- Primary: #2563eb (blue)\n"
+            "- Secondary: #1e293b (dark slate)\n"
+            "- Accent: #22c55e (green)\n"
+            "- Background: #f8fafc (light) / #0f172a (dark)\n"
+            "- Text: #1e293b (light mode) / #f1f5f9 (dark mode)\n",
+            encoding="utf-8",
+        )
+
+    try:
+        style = input("  Style preference - minimal/playful/corporate/brutal (Enter for minimal): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        style = ""
+    if not style:
+        style = "minimal"
+    (design_dir / "style.md").write_text(
+        f"# Design Style\n\nStyle: {style}\n\n"
+        f"## Guidelines\n"
+        f"- Clean spacing, generous whitespace\n"
+        f"- Consistent border-radius (8px default)\n"
+        f"- System font stack for performance\n"
+        f"- Responsive: mobile-first, breakpoints at 640px, 768px, 1024px\n",
+        encoding="utf-8",
+    )
+
+    # Read back all design files to build context string
+    parts: list[str] = []
+    for fname in ("references.md", "colors.md", "style.md"):
+        fpath = design_dir / fname
+        if fpath.exists():
+            text = fpath.read_text(encoding="utf-8").strip()
+            if text:
+                parts.append(text)
+
+    return "\n\n".join(parts) if parts else ""
+
+
+def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context=""):
     """Call Kimi to generate the enriched PRD."""
     # Format Q&A transcript
     transcript_text = ""
@@ -525,35 +672,33 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts):
 
     experts_text = ", ".join(f"{e['name']} ({e['field']})" for e in experts)
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a senior technical writer. Generate a complete enriched PRD "
-                "in markdown. Respond ONLY with the PRD, no JSON, no preamble."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"The experts ({experts_text}) have received the user's answers. "
-                f"Generate the enriched PRD.\n\n"
-                f"Experts and their questions/answers:\n{transcript_text}\n"
-                f"Original PRD:\n{prd_content}\n\n"
-                f"Generate a complete PRD that incorporates all answers. Structure:\n"
-                f"1. Keep the original PRD intact at the beginning\n"
-                f"2. Add section '## Technical Decisions' with architecture answers, "
-                f"marked [FACT], [DECISION], or [ASSUMPTION]\n"
-                f"3. Add section '## Product Strategy' with product answers\n"
-                f"4. Add section '## Security and Edge Cases' with security answers\n"
-                f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
-                f"with assumption count\n\n"
-                f"Respond ONLY with the complete PRD in markdown."
-            ),
-        },
-    ]
+    design_section = ""
+    if design_context:
+        design_section = (
+            f"\n6. Add section '## Design System' incorporating the following "
+            f"design context:\n{design_context}\n"
+        )
 
-    raw = call_kimi(messages, temperature=0.4)
+    raw = call_llm(
+        f"The experts ({experts_text}) have received the user's answers. "
+        f"Generate the enriched PRD.\n\n"
+        f"Experts and their questions/answers:\n{transcript_text}\n"
+        f"Original PRD:\n{prd_content}\n\n"
+        f"Generate a complete PRD that incorporates all answers. Structure:\n"
+        f"1. Keep the original PRD intact at the beginning\n"
+        f"2. Add section '## Technical Decisions' with architecture answers, "
+        f"marked [FACT], [DECISION], or [ASSUMPTION]\n"
+        f"3. Add section '## Product Strategy' with product answers\n"
+        f"4. Add section '## Security and Edge Cases' with security answers\n"
+        f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
+        f"with assumption count"
+        f"{design_section}\n\n"
+        f"Respond ONLY with the complete PRD in markdown.",
+        system=(
+            "You are a senior technical writer. Generate a complete enriched PRD "
+            "in markdown. Respond ONLY with the PRD, no JSON, no preamble."
+        ),
+    )
     if raw:
         # Strip markdown wrappers if present
         text = raw.strip()
@@ -610,7 +755,8 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
 
     if prd_missing or prd_empty:
         load_dotenv()
-        prd_content, continue_to_panel = _scratch_flow()
+        existing_context = _read_existing_context()
+        prd_content, continue_to_panel = _scratch_flow(existing_context)
         if not prd_content:
             return False
         if not continue_to_panel:
@@ -636,22 +782,12 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     # ── Step 1: Get expert panel from Kimi ──
     print(f"\n  {DIM}Assembling expert panel...{RESET}")
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a conductor of expertise. Respond only with valid JSON.",
-        },
-        {
-            "role": "user",
-            "content": (
-                f"{EXPERT_PANEL_PROMPT}\n\n"
-                f"PRD:\n{prd_content}\n\n"
-                f"Available context:\n{context}"
-            ),
-        },
-    ]
-
-    raw = call_kimi(messages)
+    raw = call_llm(
+        f"{EXPERT_PANEL_PROMPT}\n\n"
+        f"PRD:\n{prd_content}\n\n"
+        f"Available context:\n{context}",
+        system="You are a conductor of expertise. Respond only with valid JSON.",
+    )
     panel = None
     if raw:
         panel = parse_json(raw)
@@ -675,6 +811,9 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
 
     # Guarantee a technical / build-feasibility expert is present
     experts, questions = _ensure_technical_expert(experts, questions)
+
+    # Add a design expert when the project has a UI
+    experts = _ensure_design_expert(experts, prd_content)
 
     # Ensure each question has an id
     for i, q in enumerate(questions):
@@ -730,10 +869,13 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
           f"{CYAN}{decisions} decisions{RESET}, "
           f"{YELLOW}{assumptions} assumptions{RESET}")
 
+    # ── Step 4b: Design Context (optional) ──
+    design_context = _collect_design_context()
+
     # ── Step 5: Generate enriched PRD ──
     print(f"\n  {DIM}Generating enriched PRD...{RESET}")
 
-    enriched_prd = _generate_enriched_prd(prd_content, qa_transcript, experts)
+    enriched_prd = _generate_enriched_prd(prd_content, qa_transcript, experts, design_context)
 
     if not enriched_prd:
         # Fallback: manual assembly
@@ -743,6 +885,8 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         for a in qa_transcript:
             enriched_prd += f"- [{a['tag']}] {a['question']}: {a['answer']}\n"
         enriched_prd += f"\n## Assumption Density: {assumptions}/{len(qa_transcript)}\n"
+        if design_context:
+            enriched_prd += f"\n## Design System\n\n{design_context}\n"
 
     # ── Step 6: Preview ──
     print()

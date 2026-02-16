@@ -24,6 +24,8 @@ _DEFAULTS = {
     "models": {
         "kimi_model": "kimi-k2-0711-preview",
         "anthropic_model": "claude-sonnet-4-20250514",
+        "openai_model": "gpt-4o",
+        "validation_provider": "auto",
     },
     "context": {
         "max_context_chars": 3000,
@@ -48,6 +50,8 @@ class BuildConfig:
 class ModelsConfig:
     kimi_model: str
     anthropic_model: str
+    openai_model: str
+    validation_provider: str
 
 
 @dataclass(frozen=True)

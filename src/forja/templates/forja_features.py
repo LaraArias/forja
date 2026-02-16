@@ -15,6 +15,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from forja_utils import Feature
+
 MAX_CYCLES = 5
 VALID_STATES = ("pending", "passed", "failed", "blocked")
 EVENT_LOG = Path(".forja") / "feature-events.jsonl"
@@ -76,62 +78,66 @@ def find_feature(data, feature_id):
 def cmd_attempt(feature_id, dir_path):
     """Increment cycles for a feature. Blocks after MAX_CYCLES failures."""
     data, fpath = load_features(dir_path)
-    feat = find_feature(data, feature_id)
+    feat_dict = find_feature(data, feature_id)
+    feat = Feature.from_dict(feat_dict)
 
-    if feat.get("status") == "blocked":
-        desc = feat.get("description", feature_id)
-        print(f"[BLOCKED] {desc} is blocked after {feat.get('cycles', 0)} failed cycles - skipping",
+    if feat.status == "blocked":
+        print(f"[BLOCKED] {feat.display_name} is blocked after {feat.cycles} failed cycles - skipping",
               file=sys.stderr)
         return
 
-    feat["cycles"] = feat.get("cycles", 0) + 1
-    feat["status"] = "failed"
+    feat.cycles += 1
+    feat.status = "failed"
+    feat_dict.update(feat.to_dict())
     save_features(data, fpath)
-    print(f"Feature {feature_id}: cycle {feat['cycles']}")
-    _log_event(feature_id, "failed", cycle=feat["cycles"])
+    print(f"Feature {feature_id}: cycle {feat.cycles}")
+    _log_event(feature_id, "failed", cycle=feat.cycles)
 
-    if feat["cycles"] >= MAX_CYCLES:
-        feat["status"] = "blocked"
-        feat["blocked_at"] = datetime.now(timezone.utc).isoformat()
+    if feat.cycles >= MAX_CYCLES:
+        feat.status = "blocked"
+        feat.blocked_at = datetime.now(timezone.utc).isoformat()
+        feat_dict.update(feat.to_dict())
         save_features(data, fpath)
-        desc = feat.get("description", feature_id)
-        print(f"[BLOCKED] {desc} after {MAX_CYCLES} failed cycles - skipping",
+        print(f"[BLOCKED] {feat.display_name} after {MAX_CYCLES} failed cycles - skipping",
               file=sys.stderr)
-        _log_event(feature_id, "blocked", cycle=feat["cycles"],
+        _log_event(feature_id, "blocked", cycle=feat.cycles,
                    reason=f"exceeded {MAX_CYCLES} cycles")
 
 
 def cmd_pass(feature_id, dir_path):
     """Mark a feature as passed."""
     data, fpath = load_features(dir_path)
-    feat = find_feature(data, feature_id)
+    feat_dict = find_feature(data, feature_id)
+    feat = Feature.from_dict(feat_dict)
 
-    if feat.get("status") == "blocked":
-        desc = feat.get("description", feature_id)
-        print(f"[WARN] Blocked feature '{desc}' cannot be re-passed",
+    if feat.status == "blocked":
+        print(f"[WARN] Blocked feature '{feat.display_name}' cannot be re-passed",
               file=sys.stderr)
         return
 
-    feat["status"] = "passed"
-    feat["passed_at"] = datetime.now(timezone.utc).isoformat()
+    feat.status = "passed"
+    feat.passed_at = datetime.now(timezone.utc).isoformat()
+    feat_dict.update(feat.to_dict())
     save_features(data, fpath)
     print(f"Feature {feature_id}: PASSED")
-    _log_event(feature_id, "passed", cycle=feat.get("cycles", 0))
+    _log_event(feature_id, "passed", cycle=feat.cycles)
 
 
 def cmd_status(dir_path):
     """Print feature status table."""
     data, _ = load_features(dir_path)
-    features = data.get("features", [])
+    raw_features = data.get("features", [])
 
-    if not features:
+    if not raw_features:
         print("No features defined.")
         return
 
+    features = [Feature.from_dict(f) for f in raw_features]
+
     # Column widths
-    id_w = max(len(f.get("id", "")) for f in features)
+    id_w = max(len(f.id) for f in features)
     id_w = max(id_w, 2)
-    desc_w = max(len(f.get("description", "")) for f in features)
+    desc_w = max(len(f.description) for f in features)
     desc_w = max(desc_w, 11)
 
     header = f"{'id':<{id_w}}  {'description':<{desc_w}}  {'status':<8}  {'cycles'}"
@@ -141,19 +147,15 @@ def cmd_status(dir_path):
     passed = 0
     blocked = 0
     for feat in features:
-        fid = feat.get("id", "?")
-        desc = feat.get("description", "")
-        cycles = feat.get("cycles", 0)
-        feat_status = feat.get("status", "pending")
-        if feat_status == "blocked":
-            icon = "⊘"
+        if feat.status == "blocked":
+            icon = "\u2298"
             blocked += 1
-        elif feat_status == "passed":
-            icon = "✔"
+        elif feat.status == "passed":
+            icon = "\u2714"
             passed += 1
         else:
-            icon = "✘"
-        print(f"{fid:<{id_w}}  {desc:<{desc_w}}  {icon:<8}  {cycles}")
+            icon = "\u2718"
+        print(f"{feat.id:<{id_w}}  {feat.description:<{desc_w}}  {icon:<8}  {feat.cycles}")
 
     print()
     summary = f"{passed}/{len(features)} features completed"

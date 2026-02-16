@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from forja_utils import (
-    load_dotenv, call_kimi, parse_json,
+    load_dotenv, call_llm, parse_json,
     PASS_ICON, FAIL_ICON, WARN_ICON, RED, YELLOW, DIM, BOLD, RESET,
 )
 
@@ -75,6 +75,25 @@ compiler (C#, Java, Swift, Kotlin, Go, Rust, C++), add a MEDIUM severity gap \
 noting that these files will pass structural validation only and recommending \
 adding build/test commands to the PRD.
 
+CRITICAL CONSTRAINT: Claude Code can only install packages via pip or npm. \
+It CANNOT install system-level services. Flag as HIGH severity gap if the PRD \
+requires ANY of these:
+- Redis, PostgreSQL, MySQL, MongoDB, or any database server (SQLite is OK - it's a file)
+- Docker or docker-compose
+- Kafka, RabbitMQ, or any message broker
+- Nginx, Apache, or any web server (dev servers like uvicorn are OK)
+- System packages that need apt/brew/yum
+
+For each system dependency found, suggest a pip/npm-installable alternative:
+- Redis -> SQLite + file-based pub/sub or in-memory dict
+- PostgreSQL/MySQL -> SQLite
+- Docker -> direct pip install + uvicorn
+- Kafka -> Python queue or asyncio
+- Nginx -> uvicorn/gunicorn directly
+
+If the PRD lists Redis, PostgreSQL, Docker etc in the Stack section, the enriched \
+PRD MUST replace them with installable alternatives. This is not optional.
+
 Set "pass" to false if there are ANY high-severity findings.
 Set "pass" to true if all findings are medium or low severity.\
 """
@@ -124,8 +143,8 @@ def _read_learnings():
 
 # ── Core ─────────────────────────────────────────────────────────────
 
-def _build_messages(prd_content, context_items, learnings):
-    """Build chat messages for PRD review."""
+def _build_prompt(prd_content, context_items, learnings):
+    """Build prompt and system message for PRD review."""
     user_msg = f"{REVIEW_PROMPT}\n\n---\n\nPRD:\n{prd_content}"
 
     if context_items:
@@ -136,17 +155,12 @@ def _build_messages(prd_content, context_items, learnings):
         learn_text = "\n".join(f"- {item}" for item in learnings)
         user_msg += f"\n\n---\n\nPrevious learnings:\n{learn_text}"
 
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are a senior product architect. "
-                "You review PRDs before engineering begins. "
-                "Be specific and actionable. Respond only with valid JSON."
-            ),
-        },
-        {"role": "user", "content": user_msg},
-    ]
+    system_msg = (
+        "You are a senior product architect. "
+        "You review PRDs before engineering begins. "
+        "Be specific and actionable. Respond only with valid JSON."
+    )
+    return user_msg, system_msg
 
 
 def _print_text(review):
@@ -188,6 +202,26 @@ def _print_text(review):
             print(f"    {color}[{sev}]{RESET} {desc}")
             if suggestion:
                 print(f"      {DIM}-> {suggestion}{RESET}")
+
+            # Warn about system dependencies in HIGH gaps
+            if sev == "HIGH":
+                _SYS_DEPS = {
+                    "redis": "SQLite + in-memory dict",
+                    "postgresql": "SQLite",
+                    "postgres": "SQLite",
+                    "mysql": "SQLite",
+                    "mongodb": "SQLite or TinyDB",
+                    "docker": "direct pip install + uvicorn",
+                    "docker-compose": "direct pip install + uvicorn",
+                    "kafka": "Python queue or asyncio",
+                    "rabbitmq": "Python queue or asyncio",
+                    "nginx": "uvicorn/gunicorn directly",
+                    "apache": "uvicorn/gunicorn directly",
+                }
+                desc_lower = desc.lower()
+                for dep, alt in _SYS_DEPS.items():
+                    if dep in desc_lower:
+                        print(f"      {WARN_ICON} PRD requires system dependency: {dep}. Auto-replacing with: {alt}")
 
     # Assumptions
     if assumptions:
@@ -260,17 +294,18 @@ def cmd_specreview(prd_path, output_format="text"):
 
     # 3. Check API key
     load_dotenv()
-    if not os.environ.get("KIMI_API_KEY", ""):
-        print(f"{WARN_ICON} Spec review skipped: KIMI_API_KEY not configured")
+    has_key = any(os.environ.get(k) for k in ("KIMI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"))
+    if not has_key:
+        print(f"{WARN_ICON} Spec review skipped: no LLM API key configured")
         sys.exit(0)
 
-    # 4. Call Kimi
-    print(f"  Calling Kimi for independent review...")
-    messages = _build_messages(prd_content, context_items, learnings)
-    raw_content = call_kimi(messages, temperature=0.4)
+    # 4. Call LLM
+    print(f"  Calling LLM for independent review...")
+    prompt, system_msg = _build_prompt(prd_content, context_items, learnings)
+    raw_content = call_llm(prompt, system=system_msg)
 
-    if raw_content is None:
-        print(f"{WARN_ICON} Spec review skipped: Kimi did not respond")
+    if not raw_content:
+        print(f"{WARN_ICON} Spec review skipped: LLM did not respond")
         sys.exit(0)
 
     # 5. Parse response (4-step fallback)

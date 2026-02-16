@@ -9,6 +9,7 @@ from __future__ import annotations
 import glob as glob_mod
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from forja.constants import (
 )
 from forja.utils import (
     BOLD, CYAN, DIM, GREEN, RED, YELLOW, RESET,
-    gather_context, load_dotenv, read_feature_status, safe_read_json,
+    Feature, gather_context, load_dotenv, read_feature_status, safe_read_json,
 )
 
 # ── Placeholder detection ────────────────────────────────────────────
@@ -104,11 +105,16 @@ def _run_spec_review(prd_path):
         print(f"  {DIM}skipped (forja_specreview.py not found){RESET}")
         return
 
-    result = subprocess.run(
-        [sys.executable, str(specreview), "--prd", str(prd_path), "--output", "json"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(specreview), "--prd", str(prd_path), "--output", "json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  {YELLOW}Warning: spec review timed out after 120s, continuing{RESET}")
+        return
 
     # Show gap summary from enrichment file (not individual gaps — too noisy)
     enrichment_path = FORJA_DIR / "spec-enrichment.json"
@@ -263,12 +269,17 @@ def _inject_context_into_claude_md():
     # Learnings manifest
     learnings_script = FORJA_TOOLS / "forja_learnings.py"
     if learnings_script.exists():
-        result = subprocess.run(
-            [sys.executable, str(learnings_script), "manifest"],
-            capture_output=True,
-            text=True,
-        )
-        manifest = result.stdout.strip()
+        try:
+            result = subprocess.run(
+                [sys.executable, str(learnings_script), "manifest"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"  {YELLOW}Warning: learnings manifest timed out after 30s{RESET}")
+            result = None
+        manifest = result.stdout.strip() if result else ""
         if manifest and "No learnings found" not in manifest:
             context_parts.append("\n### Learnings from Previous Runs\n")
             context_parts.append(manifest)
@@ -382,6 +393,10 @@ def _monitor_progress(stop_event, start_time, timeout_event=None):
     phase = "planning"
     last_completion_time = time.time()
     last_passed_count = 0
+    # Per-feature stall tracking
+    feature_last_change: dict[str, float] = {}
+    feature_stall_warned: set[str] = set()
+    feature_stall_blocked: set[str] = set()
 
     while not stop_event.is_set():
         elapsed = time.time() - start_time
@@ -415,27 +430,64 @@ def _monitor_progress(stop_event, start_time, timeout_event=None):
                 features = data.get("features", data) if isinstance(data, dict) else data
                 if not isinstance(features, list):
                     continue
-                for feat in features:
-                    fid = feat.get("id", "?")
-                    key = f"{teammate_name}/{fid}"
+                for feat_dict in features:
+                    feat = Feature.from_dict(feat_dict)
+                    key = f"{teammate_name}/{feat.id}"
                     total += 1
-                    feat_status = read_feature_status(feat)
-                    if feat_status == "blocked":
+                    if feat.status == "blocked":
                         blocked += 1
                         if key not in last_status or last_status[key] != "blocked":
                             done_list.append(
-                                f"{teammate_name}/{feat.get('description', feat.get('name', fid))} [BLOCKED]"
+                                f"{teammate_name}/{feat.display_name} [BLOCKED]"
                             )
                         last_status[key] = "blocked"
-                    elif feat_status == "passed":
+                    elif feat.status == "passed":
                         passed += 1
                         if key not in last_status or last_status[key] != "passed":
                             done_list.append(
-                                f"{teammate_name}/{feat.get('description', feat.get('name', fid))}"
+                                f"{teammate_name}/{feat.display_name}"
                             )
                         last_status[key] = "passed"
                     else:
-                        last_status[key] = feat_status
+                        last_status[key] = feat.status
+
+                    # Per-feature stall tracking
+                    now = time.time()
+                    prev = last_status.get(key)
+                    if key not in feature_last_change:
+                        feature_last_change[key] = now
+                    elif prev != feat.status:
+                        feature_last_change[key] = now
+
+                    # Check per-feature stall (only for non-terminal features)
+                    if feat.status not in ("passed", "blocked"):
+                        stale_secs = now - feature_last_change[key]
+                        if stale_secs >= 480 and key not in feature_stall_blocked:
+                            feature_stall_blocked.add(key)
+                            sys.stdout.write(
+                                f"\n{RED}{BOLD}  [STALL] Blocking feature {feat.id}"
+                                f" - no progress for 8 minutes{RESET}"
+                            )
+                            sys.stdout.flush()
+                            # Auto-block via forja_features.py attempt
+                            tm_dir = str(TEAMMATES_DIR / teammate_name)
+                            try:
+                                subprocess.run(
+                                    [sys.executable,
+                                     str(FORJA_TOOLS / "forja_features.py"),
+                                     "attempt", feat.id,
+                                     "--dir", tm_dir],
+                                    capture_output=True, timeout=10,
+                                )
+                            except (subprocess.TimeoutExpired, OSError):
+                                pass
+                        elif stale_secs >= 300 and key not in feature_stall_warned:
+                            feature_stall_warned.add(key)
+                            sys.stdout.write(
+                                f"\n{YELLOW}  [STALL] Feature {feat.id}"
+                                f" has not progressed in 5 minutes{RESET}"
+                            )
+                            sys.stdout.flush()
 
             # Track new completions for timeout logic
             resolved = passed + blocked
@@ -516,17 +568,80 @@ def _count_features():
         features = data.get("features", data) if isinstance(data, dict) else data
         if not isinstance(features, list):
             continue
-        for feat in features:
+        for feat_dict in features:
             total += 1
-            feat_status = read_feature_status(feat)
-            if feat_status == "blocked":
+            feat = Feature.from_dict(feat_dict)
+            if feat.status == "blocked":
                 blocked += 1
-            elif feat_status == "passed":
+            elif feat.status == "passed":
                 passed += 1
     return total, passed, blocked
 
 
-# ── Phase 3: Outcome Evaluation ──────────────────────────────────────
+# ── Phase 3: Project Tests ──────────────────────────────────────────
+
+def _run_project_tests(project_dir: Path) -> dict:
+    """Run the generated project's own tests and capture results."""
+    results: dict = {"framework": None, "exit_code": -1, "passed": 0, "failed": 0, "output": ""}
+
+    tests_dir = project_dir / "tests"
+    package_json = project_dir / "package.json"
+
+    if tests_dir.exists() and list(tests_dir.glob("test_*.py")):
+        # Python pytest
+        results["framework"] = "pytest"
+        try:
+            r = subprocess.run(
+                ["python3", "-m", "pytest", "-v", "--tb=short"],
+                capture_output=True, text=True, cwd=str(project_dir), timeout=120,
+            )
+            results["exit_code"] = r.returncode
+            results["output"] = r.stdout + r.stderr
+            for line in r.stdout.splitlines():
+                if "passed" in line:
+                    m = re.search(r"(\d+) passed", line)
+                    if m:
+                        results["passed"] = int(m.group(1))
+                    m = re.search(r"(\d+) failed", line)
+                    if m:
+                        results["failed"] = int(m.group(1))
+        except subprocess.TimeoutExpired:
+            results["output"] = "Test execution timed out after 120s"
+        except FileNotFoundError:
+            results["output"] = "pytest not found"
+
+    elif package_json.exists():
+        # Node npm test
+        try:
+            pkg = json.loads(package_json.read_text(encoding="utf-8"))
+            if "test" in pkg.get("scripts", {}):
+                results["framework"] = "npm"
+                r = subprocess.run(
+                    ["npm", "test"], capture_output=True, text=True,
+                    cwd=str(project_dir), timeout=120,
+                )
+                results["exit_code"] = r.returncode
+                results["output"] = r.stdout + r.stderr
+        except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+            pass
+
+    # Save results
+    results_path = project_dir / ".forja" / "test-results.json"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+
+    if results["framework"]:
+        passed = results["passed"]
+        failed = results["failed"]
+        icon = f"{GREEN}✔{RESET}" if failed == 0 and passed > 0 else f"{RED}✘{RESET}"
+        print(f"  {icon} Project tests ({results['framework']}): {passed} passed, {failed} failed")
+    else:
+        print(f"  {DIM}no test suite detected{RESET}")
+
+    return results
+
+
+# ── Phase 4: Outcome Evaluation ──────────────────────────────────────
 
 def _run_outcome(prd_path):
     """Run outcome evaluation. Informational, never blocks."""
@@ -535,11 +650,16 @@ def _run_outcome(prd_path):
         print(f"  {DIM}skipped (forja_outcome.py not found){RESET}")
         return
 
-    result = subprocess.run(
-        [sys.executable, str(outcome_script), "--prd", str(prd_path), "--output", "json"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(outcome_script), "--prd", str(prd_path), "--output", "json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  {YELLOW}Warning: outcome evaluation timed out after 120s, continuing{RESET}")
+        return
 
     # Try to parse coverage from JSON output
     try:
@@ -567,7 +687,7 @@ def _run_outcome(prd_path):
         _phase_result(False, "evaluation found gaps (see .forja/outcome-report.json)")
 
 
-# ── Phase 4: Extract Learnings ───────────────────────────────────────
+# ── Phase 5: Extract Learnings ───────────────────────────────────────
 
 def _run_learnings_extract():
     """Run learnings extraction. Informational, never blocks."""
@@ -576,11 +696,16 @@ def _run_learnings_extract():
         print(f"  {DIM}skipped (forja_learnings.py not found){RESET}")
         return
 
-    result = subprocess.run(
-        [sys.executable, str(learnings_script), "extract"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(learnings_script), "extract"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  {YELLOW}Warning: learnings extraction timed out after 60s, continuing{RESET}")
+        return
 
     # Count extracted from output
     output = result.stdout.strip()
@@ -596,7 +721,7 @@ def _run_learnings_extract():
         print(f"  {DIM}extraction complete{RESET}")
 
 
-# ── Phase 5: Observatory ─────────────────────────────────────────────
+# ── Phase 6: Observatory ─────────────────────────────────────────────
 
 def _run_observatory():
     """Run observatory report. Informational, never blocks."""
@@ -605,11 +730,16 @@ def _run_observatory():
         print(f"  {DIM}skipped (forja_observatory.py not found){RESET}")
         return
 
-    result = subprocess.run(
-        [sys.executable, str(observatory_script), "report"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(observatory_script), "report"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  {YELLOW}Warning: observatory report timed out after 60s, continuing{RESET}")
+        return
 
     # Show dashboard path
     output = result.stdout.strip()
@@ -752,16 +882,16 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     print()
     print(f"{BOLD}{CYAN}  \u2500\u2500 Forja \u2500\u2500{RESET}")
     print(f"{DIM}  PRD: {prd_title}{RESET}")
-    print(f"{DIM}  Pipeline: spec-review \u2192 build \u2192 outcome \u2192 learnings \u2192 observatory{RESET}")
+    print(f"{DIM}  Pipeline: spec-review \u2192 build \u2192 tests \u2192 outcome \u2192 learnings \u2192 observatory{RESET}")
 
     pipeline_start = time.time()
 
     # ── Phase 0: Spec Review (informational + enrich) ──
-    _phase_header(0, "Spec Review", 5)
+    _phase_header(0, "Spec Review", 6)
     _run_spec_review(str(prd))
 
     # ── Phase 1: Context Injection ──
-    _phase_header(1, "Context Injection", 5)
+    _phase_header(1, "Context Injection", 6)
     _inject_context_into_claude_md()
 
     # ── Launch Observatory Live (background) ──
@@ -784,7 +914,7 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
             p.unlink()
 
     # ── Phase 2: Build (Claude Code) ──
-    _phase_header(2, "Build (Claude Code)", 5)
+    _phase_header(2, "Build (Claude Code)", 6)
 
     env = os.environ.copy()
     env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
@@ -845,18 +975,19 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     print()
 
     # Save git log as build record
-    import subprocess as sp
     try:
         project_dir = Path.cwd()
-        git_log = sp.run(
+        git_log = subprocess.run(
             ["git", "log", "--oneline", "-20"],
             capture_output=True, text=True, cwd=project_dir,
+            timeout=10,
         )
         log_path = Path(".forja/logs/build-commits.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(git_log.stdout)
-    except Exception:
-        pass
+    except Exception as e:
+        from forja.utils import logger
+        logger.debug("git log: %s", e)
 
     # Stop observatory live
     _stop_observatory_live(observatory_proc)
@@ -876,16 +1007,20 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
         build_ok = False
         _phase_result(False, f"exit {returncode} after {_format_duration(build_elapsed)}")
 
-    # ── Phase 3: Outcome Evaluation (informational) ──
-    _phase_header(3, "Outcome Evaluation", 5)
+    # ── Phase 3: Project Tests (informational) ──
+    _phase_header(3, "Project Tests", 6)
+    _run_project_tests(Path.cwd())
+
+    # ── Phase 4: Outcome Evaluation (informational) ──
+    _phase_header(4, "Outcome Evaluation", 6)
     _run_outcome(str(prd))
 
-    # ── Phase 4: Extract Learnings (informational) ──
-    _phase_header(4, "Extract Learnings", 5)
+    # ── Phase 5: Extract Learnings (informational) ──
+    _phase_header(5, "Extract Learnings", 6)
     _run_learnings_extract()
 
-    # ── Phase 5: Observatory (informational) ──
-    _phase_header(5, "Observatory Report", 5)
+    # ── Phase 6: Observatory (informational) ──
+    _phase_header(6, "Observatory Report", 6)
     _run_observatory()
 
     # ── Final summary ──

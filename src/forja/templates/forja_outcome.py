@@ -16,8 +16,9 @@ import sys
 from pathlib import Path
 
 from forja_utils import (
-    load_dotenv, call_kimi, parse_json,
+    load_dotenv, call_llm, parse_json,
     PASS_ICON, FAIL_ICON, WARN_ICON, GREEN, RED, DIM, BOLD, RESET,
+    Feature,
 )
 
 OUTCOME_PROMPT = """\
@@ -60,12 +61,10 @@ def _read_features():
             features = data.get("features", data) if isinstance(data, dict) else data
             if not isinstance(features, list):
                 continue
-            for f in features:
-                fid = f.get("id", "?")
-                desc = f.get("description", fid)
-                feat_status = f.get("status", "pending")
-                cycles = f.get("cycles", 0)
-                status = "PASSED" if feat_status == "passed" else f"FAILED (cycles={cycles})"
+            for f_dict in features:
+                feat = Feature.from_dict(f_dict)
+                desc = feat.display_name
+                status = "PASSED" if feat.status == "passed" else f"FAILED (cycles={feat.cycles})"
                 lines.append(f"  [{teammate}] {desc}: {status}")
         except (json.JSONDecodeError, OSError):
             pass
@@ -93,8 +92,8 @@ def _read_validation_specs():
 
 # ── Core ─────────────────────────────────────────────────────────────
 
-def _build_messages(prd_content, features_text, specs_text):
-    """Build chat messages for outcome evaluation."""
+def _build_prompt(prd_content, features_text, specs_text):
+    """Build prompt and system message for outcome evaluation."""
     user_msg = f"{OUTCOME_PROMPT}\n\n---\n\nPRD:\n{prd_content}"
 
     if features_text:
@@ -107,16 +106,11 @@ def _build_messages(prd_content, features_text, specs_text):
     else:
         user_msg += "\n\n---\n\nEndpoints / validation specs:\n  (no specs data found)"
 
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are a strict outcome evaluator for software projects. "
-                "Be precise about coverage. Respond only with valid JSON."
-            ),
-        },
-        {"role": "user", "content": user_msg},
-    ]
+    system_msg = (
+        "You are a strict outcome evaluator for software projects. "
+        "Be precise about coverage. Respond only with valid JSON."
+    )
+    return user_msg, system_msg
 
 
 def _print_text(result):
@@ -192,17 +186,18 @@ def cmd_outcome(prd_path, output_format="text"):
 
     # 4. Check API key
     load_dotenv()
-    if not os.environ.get("KIMI_API_KEY", ""):
-        print(f"{WARN_ICON} Outcome evaluation skipped: KIMI_API_KEY not configured")
+    has_key = any(os.environ.get(k) for k in ("KIMI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"))
+    if not has_key:
+        print(f"{WARN_ICON} Outcome evaluation skipped: no LLM API key configured")
         sys.exit(0)
 
-    # 5. Call Kimi
-    print(f"  Calling Kimi for outcome evaluation...")
-    messages = _build_messages(prd_content, features_text, specs_text)
-    raw_content = call_kimi(messages, temperature=0.3)
+    # 5. Call LLM
+    print(f"  Calling LLM for outcome evaluation...")
+    prompt, system_msg = _build_prompt(prd_content, features_text, specs_text)
+    raw_content = call_llm(prompt, system=system_msg)
 
-    if raw_content is None:
-        print(f"{WARN_ICON} Outcome evaluation skipped: Kimi did not respond")
+    if not raw_content:
+        print(f"{WARN_ICON} Outcome evaluation skipped: LLM did not respond")
         sys.exit(0)
 
     # 6. Parse response

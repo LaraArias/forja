@@ -10,8 +10,9 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # ── Structured logging ───────────────────────────────────────────────
 
@@ -82,20 +83,9 @@ WARN_ICON = f"{YELLOW}{Style.WARN}{RESET}"
 
 # ── LLM constants ───────────────────────────────────────────────────
 
-from forja.constants import ANTHROPIC_MODEL
-
 KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-
-
-def _get_kimi_model() -> str:
-    from forja.config_loader import load_config
-    return load_config().models.kimi_model
-
-
-def _get_anthropic_model() -> str:
-    from forja.config_loader import load_config
-    return load_config().models.anthropic_model
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 # ── .env loading ────────────────────────────────────────────────────
 
@@ -109,15 +99,30 @@ def load_dotenv(paths: list[str] | None = None) -> dict[str, str]:
     and sets them in os.environ (without overwriting existing values).
     Guards against double-loading the same file path.
 
+    Always loads ``~/.forja/config.env`` first (the global config written
+    by ``forja config``), then processes *paths*.
+
     Args:
-        paths: List of file paths to load. Defaults to
-               [".env", "~/.forja/config.env"].
+        paths: List of file paths to load. Defaults to ``[".env"]``.
 
     Returns:
         Dict of all key=value pairs that were loaded.
     """
+    # Load global config first
+    global_config = Path.home() / ".forja" / "config.env"
+    if global_config.exists() and str(global_config) not in _loaded_paths:
+        _loaded_paths.add(str(global_config))
+        for line in global_config.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and value:
+                    os.environ.setdefault(key, value)
+
     if paths is None:
-        paths = [".env", str(Path.home() / ".forja" / "config.env")]
+        paths = [".env"]
 
     loaded: dict[str, str] = {}
 
@@ -166,33 +171,30 @@ def _sanitize_error_body(body: str) -> str:
     return "\n".join(safe_lines)[:100]
 
 
-def call_kimi(
-    messages: list[dict[str, str]],
-    temperature: float = 0.6,
-    max_tokens: int = 4096,
-    timeout: int = 60,
-) -> str | None:
+def _call_kimi_raw(
+    prompt: str,
+    system: str,
+    model: str,
+) -> str:
     """Call Kimi (Moonshot AI) chat completion API.
 
-    Args:
-        messages: OpenAI-format message list [{"role": ..., "content": ...}].
-        temperature: Sampling temperature.
-        max_tokens: Maximum response tokens.
-        timeout: Request timeout in seconds.
-
-    Returns:
-        Response text content, or None on any failure.
+    Raises on failure so ``call_llm`` auto-fallback can try the next provider.
     """
     load_dotenv()
     api_key = os.environ.get("KIMI_API_KEY", "")
     if not api_key:
-        return None
+        raise RuntimeError("KIMI_API_KEY not set")
+
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
 
     payload = json.dumps({
-        "model": _get_kimi_model(),
+        "model": model,
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        "temperature": 0.6,
+        "max_tokens": 4096,
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -208,7 +210,7 @@ def call_kimi(
 
     try:
         ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return body["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
@@ -217,48 +219,33 @@ def call_kimi(
             error_body = e.read().decode("utf-8", errors="replace")
         except Exception as exc:
             logger.debug("reading Kimi error body: %s", exc)
-        print_error(f"Kimi: HTTP {e.code} {e.reason}")
-        if error_body:
-            print(f"  {DIM}{_sanitize_error_body(error_body)}{RESET}", file=sys.stderr)
-        return None
+        raise RuntimeError(f"Kimi: HTTP {e.code} {e.reason} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        print_error(f"Kimi timeout/network: {e}")
-        return None
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        print_error("Kimi: unexpected response format")
-        return None
+        raise RuntimeError(f"Kimi timeout/network: {e}") from e
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        raise RuntimeError("Kimi: unexpected response format") from e
 
 
-def call_anthropic(
-    messages: list[dict[str, str]],
-    system: str = "",
+def _call_anthropic_raw(
+    prompt: str,
+    system: str,
+    model: str,
     tools: list[dict] | None = None,
-    temperature: float = 0.7,
-    max_tokens: int = 1500,
-    timeout: int = 90,
-) -> str | None:
+) -> str:
     """Call Anthropic (Claude) messages API.
 
-    Args:
-        messages: Message list [{"role": ..., "content": ...}].
-        system: System prompt.
-        tools: Tool definitions (e.g. web_search).
-        temperature: Sampling temperature.
-        max_tokens: Maximum response tokens.
-        timeout: Request timeout in seconds.
-
-    Returns:
-        Concatenated text blocks from response, or None on failure.
+    Raises on failure so ``call_llm`` auto-fallback can try the next provider.
+    Accepts optional *tools* for advanced use (e.g. web_search).
     """
     load_dotenv()
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return None
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
 
     body: dict = {
-        "model": _get_anthropic_model(),
-        "max_tokens": max_tokens,
-        "messages": messages,
+        "model": model,
+        "max_tokens": 1500,
+        "messages": [{"role": "user", "content": prompt}],
     }
     if system:
         body["system"] = system
@@ -281,31 +268,151 @@ def call_anthropic(
 
     try:
         ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            content_blocks = data.get("content", [])
             text_parts = [
                 block["text"]
-                for block in content_blocks
+                for block in data.get("content", [])
                 if block.get("type") == "text"
             ]
-            return "\n".join(text_parts) if text_parts else None
+            if not text_parts:
+                raise RuntimeError("Empty response from Anthropic")
+            return "\n".join(text_parts)
     except urllib.error.HTTPError as e:
         error_body = ""
         try:
             error_body = e.read().decode("utf-8", errors="replace")
         except Exception as exc:
             logger.debug("reading Claude error body: %s", exc)
-        print_error(f"Claude: HTTP {e.code} {e.reason}")
-        if error_body:
-            print(f"  {DIM}{_sanitize_error_body(error_body)}{RESET}", file=sys.stderr)
-        return None
+        raise RuntimeError(f"Claude: HTTP {e.code} {e.reason} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        print_error(f"Claude timeout/network: {e}")
-        return None
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        print_error("Claude: unexpected response format")
-        return None
+        raise RuntimeError(f"Claude timeout/network: {e}") from e
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        raise RuntimeError("Claude: unexpected response format") from e
+
+
+def _call_openai_raw(
+    prompt: str,
+    system: str,
+    model: str,
+) -> str:
+    """Call OpenAI chat completion API.
+
+    Raises on failure so ``call_llm`` auto-fallback can try the next provider.
+    """
+    load_dotenv()
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 4096,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        OPENAI_API_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": f"Forja/{VERSION}",
+        },
+        method="POST",
+    )
+
+    try:
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return body["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        error_body = ""
+        try:
+            error_body = e.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            logger.debug("reading OpenAI error body: %s", exc)
+        raise RuntimeError(f"OpenAI: HTTP {e.code} {e.reason} {_sanitize_error_body(error_body)}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise RuntimeError(f"OpenAI timeout/network: {e}") from e
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        raise RuntimeError("OpenAI: unexpected response format") from e
+
+
+def _call_provider(
+    prompt: str,
+    system: str,
+    provider: str,
+    model: str | None,
+) -> str:
+    """Dispatch to the appropriate provider's raw function."""
+    from forja.config_loader import load_config
+    cfg = load_config()
+    if provider == "kimi":
+        return _call_kimi_raw(prompt, system, model or cfg.models.kimi_model)
+    elif provider == "anthropic":
+        return _call_anthropic_raw(prompt, system, model or cfg.models.anthropic_model)
+    elif provider == "openai":
+        return _call_openai_raw(prompt, system, model or cfg.models.openai_model)
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+def call_llm(
+    prompt: str,
+    system: str = "",
+    provider: str = "auto",
+    model: str | None = None,
+    max_retries: int = 2,
+) -> str:
+    """Call an LLM provider with retry and exponential backoff.
+
+    *provider* can be ``'kimi'``, ``'anthropic'``, ``'openai'``, or ``'auto'``.
+    Auto tries kimi first, falls back to anthropic, then openai.
+    Each provider is retried up to *max_retries* times with exponential backoff.
+    """
+    if provider == "auto":
+        providers = ["kimi", "anthropic", "openai"]
+    else:
+        providers = [provider]
+
+    last_error = None
+    for p in providers:
+        p = p.strip()
+        for attempt in range(max_retries + 1):
+            try:
+                return _call_provider(prompt, system, p, model)
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    import time
+                    delay = min(2 ** attempt, 8)
+                    time.sleep(delay)
+                    continue
+                break
+
+    # Specific provider requested: re-raise so callers see the error
+    if provider != "auto" and last_error is not None:
+        raise last_error
+    return ""
+
+
+# Backward-compatible wrappers
+
+def call_kimi(prompt: str, system: str = "") -> str:
+    """Call Kimi provider. Wrapper around :func:`call_llm`."""
+    return call_llm(prompt, system, provider="kimi")
+
+
+def call_anthropic(prompt: str, system: str = "") -> str:
+    """Call Anthropic provider. Wrapper around :func:`call_llm`."""
+    return call_llm(prompt, system, provider="anthropic")
 
 
 # ── JSON parsing ────────────────────────────────────────────────────
@@ -452,25 +559,114 @@ def print_success(msg: str) -> None:
     print(f"  {GREEN}{msg}{RESET}")
 
 
+# ── Feature dataclass ──────────────────────────────────────────────
+
+
+@dataclass
+class Feature:
+    """Typed representation of a feature from features.json.
+
+    Use ``Feature.from_dict(d)`` to deserialize from JSON dicts.
+    Use ``feat.to_dict()`` to serialize back for JSON writing.
+    """
+
+    id: str
+    description: str = ""
+    status: str = "pending"  # pending | passed | failed | blocked
+    cycles: int = 0
+    created_at: Optional[str] = None
+    passed_at: Optional[str] = None
+    blocked_at: Optional[str] = None
+    name: Optional[str] = None  # Legacy fallback for description
+    _teammate: Optional[str] = field(default=None, repr=False)
+    _extra: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Feature:
+        """Deserialize from a JSON dict, handling legacy boolean schema."""
+        status = d.get("status")
+        if status not in ("pending", "passed", "failed", "blocked"):
+            if d.get("blocked"):
+                status = "blocked"
+            elif d.get("passes") or d.get("passed"):
+                status = "passed"
+            elif d.get("cycles", 0) > 0:
+                status = "failed"
+            else:
+                status = "pending"
+
+        known_keys = {
+            "id", "description", "status", "cycles",
+            "created_at", "passed_at", "blocked_at",
+            "name", "_teammate",
+            # Legacy keys consumed above — not stored
+            "blocked", "passes", "passed",
+        }
+        extra = {k: v for k, v in d.items() if k not in known_keys}
+
+        return cls(
+            id=d.get("id", ""),
+            description=d.get("description", d.get("name", "")),
+            status=status,
+            cycles=d.get("cycles", 0),
+            created_at=d.get("created_at"),
+            passed_at=d.get("passed_at"),
+            blocked_at=d.get("blocked_at"),
+            name=d.get("name"),
+            _teammate=d.get("_teammate"),
+            _extra=extra,
+        )
+
+    def to_dict(self) -> dict:
+        """Serialize to a JSON-safe dict.
+
+        Omits None values and internal fields (``_teammate``, ``_extra``)
+        to keep features.json clean.  Extra fields are re-merged so
+        unknown keys survive round-trips.
+        """
+        d: dict = {"id": self.id}
+        if self.description:
+            d["description"] = self.description
+        d["status"] = self.status
+        d["cycles"] = self.cycles
+        if self.created_at is not None:
+            d["created_at"] = self.created_at
+        if self.passed_at is not None:
+            d["passed_at"] = self.passed_at
+        if self.blocked_at is not None:
+            d["blocked_at"] = self.blocked_at
+        # Preserve any unknown keys for forward compat
+        d.update(self._extra)
+        return d
+
+    @property
+    def is_terminal(self) -> bool:
+        """True if the feature is in a terminal state (blocked or passed)."""
+        return self.status in ("blocked", "passed")
+
+    @property
+    def can_retry(self) -> bool:
+        """True if the feature can be attempted again."""
+        return not self.is_terminal
+
+    @property
+    def display_name(self) -> str:
+        """Return the best human-readable name for this feature."""
+        return self.description or self.name or self.id
+
+
 # ── Feature status ─────────────────────────────────────────────────
 
 
-def read_feature_status(feat: dict) -> str:
+def read_feature_status(feat: dict | Feature) -> str:
     """Canonical way to read feature status.
 
     Handles both the new string ``status`` field and the legacy boolean
     ``passes``/``blocked`` fields for backward compatibility.
+    Also accepts a :class:`Feature` instance directly.
 
     Returns one of: ``"pending"``, ``"passed"``, ``"failed"``, ``"blocked"``.
     """
-    status = feat.get("status")
-    if status in ("pending", "passed", "failed", "blocked"):
-        return status
-    # Fallback: old boolean schema
-    if feat.get("blocked"):
-        return "blocked"
-    if feat.get("passes") or feat.get("passed"):
-        return "passed"
-    if feat.get("cycles", 0) > 0:
-        return "failed"
-    return "pending"
+    if isinstance(feat, Feature):
+        return feat.status
+    return Feature.from_dict(feat).status
