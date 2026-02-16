@@ -10,6 +10,7 @@ Covers the 5 most critical functions with zero test coverage:
 
 import json
 import os
+import shutil
 import sys
 import urllib.error
 from pathlib import Path
@@ -604,6 +605,7 @@ class TestRunProjectTests:
         assert results["failed"] == 0
         assert results["exit_code"] == 0
 
+    @pytest.mark.skipif(shutil.which("npm") is None, reason="npm not installed")
     def test_detects_npm(self, tmp_path):
         """Detects npm test when package.json has a test script."""
         from forja.runner import _run_project_tests

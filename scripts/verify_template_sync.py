@@ -10,6 +10,8 @@ plain signatures in template) don't cause false positives.
 Exit 0 = all synced.  Exit 1 = drift detected.
 """
 
+from __future__ import annotations
+
 import ast
 import sys
 from pathlib import Path
