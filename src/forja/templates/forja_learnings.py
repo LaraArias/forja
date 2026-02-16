@@ -34,7 +34,7 @@ VALID_CATEGORIES = [
     "product-backlog",
 ]
 
-MANIFEST_MAX_CHARS = 2000
+MANIFEST_MAX_CHARS = 4000
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 

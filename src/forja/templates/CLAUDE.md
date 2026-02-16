@@ -9,6 +9,13 @@ The runner already ran spec-review before launching you. If you see a `## Auto-e
 
 If the 'Shared Context' section includes information from company, domains, or design-system, you MUST respect those conventions in all architecture, naming, and code decisions. Do not ignore the business context.
 
+If you see a `## CRITICAL: Previous Run Learnings` section in this file, these are HIGH PRIORITY insights from previous build failures. You MUST:
+1. Pre-install any dependencies listed under "Dependencies to auto-install" BEFORE starting work
+2. Follow all "Validation rules to enforce" before marking features as passed
+3. Address all "PRD patterns to include" in your implementation
+4. NEVER repeat mistakes from previous learnings
+These learnings override default assumptions. Ignoring them causes the same failures.
+
 If context/_index.md exists, read it FIRST. It is the project context map. It tells you which file to consult for each decision. Follow the _index.md rules: context/ is read-only, it is the source of truth, extract don't invent.
 
 ## Step 1: Preflight

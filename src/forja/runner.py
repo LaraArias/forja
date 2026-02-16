@@ -255,21 +255,24 @@ def _inject_context_into_claude_md():
 
     content = claude_md.read_text(encoding="utf-8")
 
-    # Don't inject if already there
-    if "## Shared Context (auto-generated)" in content:
-        # Remove old injection to refresh
-        lines = content.splitlines()
-        new_lines = []
-        skip = False
-        for line in lines:
-            if line.strip() == "## Shared Context (auto-generated)":
-                skip = True
-                continue
-            if skip and line.startswith("## "):
-                skip = False
-            if not skip:
-                new_lines.append(line)
-        content = "\n".join(new_lines)
+    # Remove old injections to refresh
+    for marker in [
+        "## CRITICAL: Previous Run Learnings (auto-generated)",
+        "## Shared Context (auto-generated)",
+    ]:
+        if marker in content:
+            lines = content.splitlines()
+            new_lines = []
+            skip = False
+            for line in lines:
+                if line.strip() == marker:
+                    skip = True
+                    continue
+                if skip and line.startswith("## "):
+                    skip = False
+                if not skip:
+                    new_lines.append(line)
+            content = "\n".join(new_lines)
 
     # Build context section
     context_parts = []
@@ -300,7 +303,8 @@ def _inject_context_into_claude_md():
         context_parts.append("### Previous Decisions\n")
         context_parts.extend(store_items[:15])
 
-    # Learnings manifest
+    # Learnings manifest (separate CRITICAL section, not part of Shared Context)
+    learnings_block = ""
     learnings_script = FORJA_TOOLS / "forja_learnings.py"
     if learnings_script.exists():
         try:
@@ -315,8 +319,7 @@ def _inject_context_into_claude_md():
             result = None
         manifest = result.stdout.strip() if result else ""
         if manifest and "No learnings found" not in manifest:
-            context_parts.append("\n### Learnings from Previous Runs\n")
-            context_parts.append(manifest)
+            learnings_block = manifest
 
     # Business context: company, domains, design-system
     biz_text = gather_context(CONTEXT_DIR, max_chars=load_config().context.max_context_chars)
@@ -324,13 +327,18 @@ def _inject_context_into_claude_md():
         context_parts.append("\n### Business Context\n")
         context_parts.append(biz_text)
 
-    if not context_parts:
+    if not context_parts and not learnings_block:
         print(f"  {DIM}no context to inject{RESET}")
         return
 
-    # Insert after first heading
-    context_block = "\n## Shared Context (auto-generated)\n\n"
-    context_block += "\n".join(context_parts) + "\n"
+    # Build injection blocks (learnings get their own CRITICAL section)
+    context_block = ""
+    if learnings_block:
+        context_block += "\n## CRITICAL: Previous Run Learnings (auto-generated)\n\n"
+        context_block += learnings_block + "\n"
+    if context_parts:
+        context_block += "\n## Shared Context (auto-generated)\n\n"
+        context_block += "\n".join(context_parts) + "\n"
 
     lines = content.splitlines()
     insert_idx = 1  # After first line (title)
@@ -348,7 +356,7 @@ def _inject_context_into_claude_md():
     claude_md.write_text("\n".join(lines), encoding="utf-8")
 
     items_count = len(store_items)
-    has_learnings = "Learnings" in context_block
+    has_learnings = bool(learnings_block)
     has_index = index_path.exists()
     summary_parts = []
     if has_index:
@@ -1434,6 +1442,25 @@ def run_iterate(prd_path: str | None = None) -> bool:
                     print(f"    ... and {len(unmet) - 5} more")
                 print()
         except (json.JSONDecodeError, OSError):
+            pass
+
+    # Show learnings that will carry forward
+    learnings_script = FORJA_TOOLS / "forja_learnings.py"
+    if learnings_script.exists():
+        try:
+            lr = subprocess.run(
+                [sys.executable, str(learnings_script), "manifest"],
+                capture_output=True, text=True, timeout=10,
+            )
+            manifest = lr.stdout.strip()
+            if manifest and "No learnings" not in manifest:
+                print(f"  {CYAN}Learnings stacked for next run:{RESET}")
+                for line in manifest.splitlines()[:8]:
+                    print(f"    {line}")
+                if len(manifest.splitlines()) > 8:
+                    print(f"    {DIM}...{RESET}")
+                print()
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     # ── Options menu ──
