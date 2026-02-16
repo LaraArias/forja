@@ -103,6 +103,44 @@ TECHNICAL_QUESTIONS = [
 ]
 
 
+# ── Skill detection ──────────────────────────────────────────────
+
+SKILL_EXPERT_GUIDANCE = {
+    "landing-page": """The project is a LANDING PAGE. Experts should focus on:
+- Copy, messaging, and tone of voice
+- Page sections: hero, features, social proof, CTA, footer
+- Visual design: colors, typography, imagery, whitespace
+- Audience targeting: who visits, what convinces them to act
+- CTA strategy: what action, what button text, what urgency
+Do NOT ask about databases, APIs, deployment, or backend architecture.""",
+
+    "api-backend": """The project is an API/BACKEND. Experts should focus on:
+- Endpoint design and REST conventions
+- Data model and relationships
+- Business rules and validation
+- Error handling and edge cases
+- Authentication and security requirements
+Do NOT ask about visual design, CSS, or frontend layout.""",
+
+    "custom": """The project type is general. Experts should focus on the most relevant aspects based on the PRD content.""",
+}
+
+
+def _detect_skill() -> str:
+    """Detect which skill is active. Returns 'landing-page', 'api-backend', or 'custom'."""
+    for path in [Path(".forja/skill/agents.json"), Path(".forja-tools/skill.json")]:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                agent_names = [a.get("name", "") for a in data] if isinstance(data, list) else []
+                if "frontend-builder" in agent_names or "seo-optimizer" in agent_names:
+                    return "landing-page"
+                if "database" in agent_names or "security" in agent_names:
+                    return "api-backend"
+            except Exception:
+                pass
+    return "custom"
+
 
 def _call_claude_research(expert_name, expert_field, topic, prd_summary):
     """Call Claude API with web search tool for expert research."""
@@ -498,8 +536,12 @@ def _print_header(prd_title, experts, assessment):
     print()
 
 
-def _ask_question(q, experts, prd_summary):
-    """Present a question and get user response. Returns (answer, tag)."""
+def _ask_question(q, experts, prd_summary, research_log=None):
+    """Present a question and get user response. Returns (answer, tag).
+
+    *research_log*, when provided, accumulates ``{"topic": ..., "findings": ...}``
+    dicts for every successful research call made during this question.
+    """
     expert = q["expert_name"]
     qid = q["id"]
     total = 8
@@ -535,7 +577,9 @@ def _ask_question(q, experts, prd_summary):
         if answer.lower().startswith("research "):
             topic = answer[9:].strip()
             if topic:
-                _do_research(expert, topic, prd_summary, experts)
+                findings = _do_research(expert, topic, prd_summary, experts)
+                if findings and research_log is not None:
+                    research_log.append({"topic": topic, "findings": findings})
                 # Re-show question
                 print()
                 print(f"  {color}{BOLD}[{expert} — {qid}/{total}]{RESET} {question}")
@@ -549,7 +593,11 @@ def _ask_question(q, experts, prd_summary):
 
 
 def _do_research(expert_name, topic, prd_summary, experts=None):
-    """Research a topic using Claude with web search (primary) or Kimi (fallback)."""
+    """Research a topic using Claude with web search (primary) or Kimi (fallback).
+
+    Returns the research findings as a string, or empty string on failure.
+    Saves findings to ``.forja/research/`` for future reference.
+    """
     color = _get_expert_color(expert_name, experts) if experts else DIM
     # Find expert field
     expert_field = ""
@@ -561,32 +609,51 @@ def _do_research(expert_name, topic, prd_summary, experts=None):
 
     print(f"\n  {DIM}Researching: {topic}...{RESET}")
 
+    findings = ""
+
     # Primary: Claude with web search
     raw = _call_claude_research(expert_name, expert_field, topic, prd_summary)
     if raw:
+        findings = raw.strip()
         print(f"  {DIM}(web search via Claude){RESET}")
         print()
-        for line in raw.strip().splitlines():
-            print(f"  {color}  {line}{RESET}")
-        print()
-        return
-
-    # Fallback: any provider without web search
-    print(f"  {YELLOW}Web search unavailable, using expert knowledge only{RESET}")
-    raw = call_llm(
-        f"The project context: {prd_summary}\n\n"
-        f"Research topic: {topic}\n\n"
-        f"Respond as {expert_name} would: with specific data, benchmarks, "
-        f"and a concrete recommendation. Keep it under 200 words.",
-        system=f"You are {expert_name}, a domain expert. Answer concisely with concrete data and a clear recommendation.",
-    )
-    if raw:
-        print()
-        for line in raw.strip().splitlines():
+        for line in findings.splitlines():
             print(f"  {color}  {line}{RESET}")
         print()
     else:
-        print(f"  {RED}Could not research (no model available){RESET}")
+        # Fallback: any provider without web search
+        print(f"  {YELLOW}Web search unavailable, using expert knowledge only{RESET}")
+        raw = call_llm(
+            f"The project context: {prd_summary}\n\n"
+            f"Research topic: {topic}\n\n"
+            f"Respond as {expert_name} would: with specific data, benchmarks, "
+            f"and a concrete recommendation. Keep it under 200 words.",
+            system=f"You are {expert_name}, a domain expert. Answer concisely with concrete data and a clear recommendation.",
+        )
+        if raw:
+            findings = raw.strip()
+            print()
+            for line in findings.splitlines():
+                print(f"  {color}  {line}{RESET}")
+            print()
+        else:
+            print(f"  {RED}Could not research (no model available){RESET}")
+
+    # Save to .forja/research/ for future reference
+    if findings:
+        _save_research(topic, findings)
+
+    return findings
+
+
+def _save_research(topic: str, findings: str) -> None:
+    """Persist research findings to .forja/research/ directory."""
+    research_dir = FORJA_DIR / "research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    slug = "".join(c if c.isalnum() or c == "-" else "-" for c in topic.lower())[:80]
+    fpath = research_dir / f"{slug}.md"
+    fpath.write_text(f"# Research: {topic}\n\n{findings}\n", encoding="utf-8")
+    print(f"  {DIM}Saved: {fpath}{RESET}")
 
 
 def _collect_design_context() -> str:
@@ -659,7 +726,7 @@ def _collect_design_context() -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context=""):
+def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="", research_log=None):
     """Call Kimi to generate the enriched PRD."""
     # Format Q&A transcript
     transcript_text = ""
@@ -679,6 +746,17 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
             f"design context:\n{design_context}\n"
         )
 
+    research_section = ""
+    if research_log:
+        research_text = "\n".join(
+            f"- **{r['topic']}**: {r['findings'][:300]}" for r in research_log
+        )
+        next_num = 7 if design_context else 6
+        research_section = (
+            f"\n{next_num}. Add section '## Research Findings' incorporating these "
+            f"research results gathered during planning:\n{research_text}\n"
+        )
+
     raw = call_llm(
         f"The experts ({experts_text}) have received the user's answers. "
         f"Generate the enriched PRD.\n\n"
@@ -692,7 +770,8 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
         f"4. Add section '## Security and Edge Cases' with security answers\n"
         f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
         f"with assumption count"
-        f"{design_section}\n\n"
+        f"{design_section}"
+        f"{research_section}\n\n"
         f"Respond ONLY with the complete PRD in markdown.",
         system=(
             "You are a senior technical writer. Generate a complete enriched PRD "
@@ -711,13 +790,124 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
     return None
 
 
-def _save_transcript(experts, questions, qa_transcript, enriched_prd):
+def _modify_prd_section(prd_text: str, feedback: str) -> str:
+    """Use LLM to modify a specific section of the PRD based on user feedback."""
+    prompt = (
+        f"Here is a PRD:\n\n{prd_text}\n\n"
+        f"The user wants this change: \"{feedback}\"\n\n"
+        f"Modify ONLY the relevant section. Keep everything else unchanged. "
+        f"Return the full updated PRD."
+    )
+    result = call_llm(
+        prompt,
+        system=(
+            "You are a PRD editor. Make minimal targeted changes based on the "
+            "user's feedback. Do not rewrite sections that don't need changes. "
+            "Return ONLY the PRD in markdown, no preamble."
+        ),
+    )
+    if result:
+        text = result.strip()
+        if text.startswith("```"):
+            first_nl = text.find("\n")
+            last_fence = text.rfind("```")
+            if first_nl != -1 and last_fence > first_nl:
+                text = text[first_nl + 1:last_fence].strip()
+        return text
+    return prd_text
+
+
+def _regenerate_prd_with_feedback(prd_text: str, feedback: str) -> str:
+    """Regenerate the entire PRD incorporating user feedback."""
+    prompt = (
+        f"Here is a PRD that needs revision:\n\n{prd_text}\n\n"
+        f"The user's feedback: \"{feedback}\"\n\n"
+        f"Regenerate the PRD incorporating this feedback. Keep the same "
+        f"structure but improve based on the feedback."
+    )
+    result = call_llm(
+        prompt,
+        system=(
+            "You are a PRD writer. Regenerate the PRD incorporating the "
+            "user's feedback while maintaining professional structure. "
+            "Return ONLY the PRD in markdown, no preamble."
+        ),
+    )
+    if result:
+        text = result.strip()
+        if text.startswith("```"):
+            first_nl = text.find("\n")
+            last_fence = text.rfind("```")
+            if first_nl != -1 and last_fence > first_nl:
+                text = text[first_nl + 1:last_fence].strip()
+        return text
+    return prd_text
+
+
+def _interactive_prd_edit(prd_text: str) -> str:
+    """Let user review and edit the enriched PRD interactively."""
+    while True:
+        print(f"\n  {BOLD}Options:{RESET}")
+        print(f"    {GREEN}(1){RESET} Accept and save")
+        print(f"    {YELLOW}(2){RESET} Edit a section (tell me what to change)")
+        print(f"    {CYAN}(3){RESET} Regenerate with feedback")
+        print(f"    {DIM}(4){RESET} View full PRD")
+        print()
+
+        try:
+            choice = input(f"  {BOLD}>{RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return prd_text
+
+        if choice == "1":
+            return prd_text
+        elif choice == "2":
+            try:
+                feedback = input(f"  {BOLD}What would you change?{RESET} > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            if feedback:
+                print(f"\n  {DIM}Updating PRD...{RESET}")
+                prd_text = _modify_prd_section(prd_text, feedback)
+                print(f"\n  {BOLD}── Updated PRD (preview) ──{RESET}")
+                preview = prd_text[:500]
+                if len(prd_text) > 500:
+                    preview += "..."
+                for line in preview.splitlines():
+                    print(f"  {line}")
+        elif choice == "3":
+            try:
+                feedback = input(
+                    f"  {BOLD}Describe what you want differently{RESET} > "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            if feedback:
+                print(f"\n  {DIM}Regenerating PRD...{RESET}")
+                prd_text = _regenerate_prd_with_feedback(prd_text, feedback)
+                print(f"\n  {BOLD}── Regenerated PRD (preview) ──{RESET}")
+                preview = prd_text[:500]
+                if len(prd_text) > 500:
+                    preview += "..."
+                for line in preview.splitlines():
+                    print(f"  {line}")
+        elif choice == "4":
+            print()
+            for line in prd_text.splitlines():
+                print(f"  {line}")
+
+
+def _save_transcript(experts, questions, qa_transcript, enriched_prd, research_log=None):
     """Save full transcript to .forja/plan-transcript.json."""
     transcript = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "experts": experts,
         "questions": questions,
         "answers": qa_transcript,
+        "research": research_log or [],
         "enriched_prd_length": len(enriched_prd) if enriched_prd else 0,
     }
 
@@ -780,10 +970,13 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     context = _gather_context()
 
     # ── Step 1: Get expert panel from Kimi ──
+    skill = _detect_skill()
+    skill_guidance = SKILL_EXPERT_GUIDANCE.get(skill, SKILL_EXPERT_GUIDANCE["custom"])
     print(f"\n  {DIM}Assembling expert panel...{RESET}")
 
     raw = call_llm(
         f"{EXPERT_PANEL_PROMPT}\n\n"
+        f"IMPORTANT CONTEXT:\n{skill_guidance}\n\n"
         f"PRD:\n{prd_content}\n\n"
         f"Available context:\n{context}",
         system="You are a conductor of expertise. Respond only with valid JSON.",
@@ -825,11 +1018,12 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
 
     # ── Step 3: Interactive Q&A ──
     qa_transcript = []
-    print(f"  {DIM}Answer each question. Enter=accept, skip=default, research [topic]=investigate, done=finish{RESET}")
+    research_log: list[dict] = []
+    print(f"  {DIM}Enter=accept default | skip | research [topic] to investigate | done to finish{RESET}")
     print()
 
     for q in questions:
-        answer, tag = _ask_question(q, experts, prd_summary)
+        answer, tag = _ask_question(q, experts, prd_summary, research_log)
 
         if tag == "DONE":
             # Fill remaining with defaults
@@ -875,7 +1069,9 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     # ── Step 5: Generate enriched PRD ──
     print(f"\n  {DIM}Generating enriched PRD...{RESET}")
 
-    enriched_prd = _generate_enriched_prd(prd_content, qa_transcript, experts, design_context)
+    enriched_prd = _generate_enriched_prd(
+        prd_content, qa_transcript, experts, design_context, research_log,
+    )
 
     if not enriched_prd:
         # Fallback: manual assembly
@@ -887,6 +1083,10 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         enriched_prd += f"\n## Assumption Density: {assumptions}/{len(qa_transcript)}\n"
         if design_context:
             enriched_prd += f"\n## Design System\n\n{design_context}\n"
+        if research_log:
+            enriched_prd += "\n## Research Findings\n\n"
+            for r in research_log:
+                enriched_prd += f"### {r['topic']}\n{r['findings']}\n\n"
 
     # ── Step 6: Preview ──
     print()
@@ -900,21 +1100,13 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         print(f"  {DIM}... ({len(preview_lines) - 60} more lines){RESET}")
     print()
 
-    # ── Step 7: Confirm save ──
-    try:
-        confirm = input(f"  {BOLD}Save enriched PRD? (y/n):{RESET} ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        confirm = "n"
-
-    if confirm in ("y", "yes"):
-        prd_file.write_text(enriched_prd + "\n", encoding="utf-8")
-        print(f"\n  {GREEN}✔ PRD saved to {prd_file}{RESET}")
-    else:
-        print(f"\n  {DIM}PRD not modified.{RESET}")
+    # ── Step 7: Interactive edit / confirm ──
+    enriched_prd = _interactive_prd_edit(enriched_prd)
+    prd_file.write_text(enriched_prd + "\n", encoding="utf-8")
+    print(f"\n  {GREEN}✔ PRD saved to {prd_file}{RESET}")
 
     # ── Step 8: Save transcript ──
-    transcript_path = _save_transcript(experts, questions, qa_transcript, enriched_prd)
+    transcript_path = _save_transcript(experts, questions, qa_transcript, enriched_prd, research_log)
     print(f"  {DIM}Transcript: {transcript_path}{RESET}")
 
     if not _called_from_runner:

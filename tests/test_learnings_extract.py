@@ -239,6 +239,87 @@ class TestCmdExtractIntegration:
         assert "src/db/queries.py" in learning
         assert "validation rule" in learning
 
+    def test_extracts_business_unmet_as_product_backlog(self, tmp_path, monkeypatch):
+        """Unmet items with type 'business' → product-backlog, LOW severity."""
+        monkeypatch.chdir(tmp_path)
+
+        forja_dir = tmp_path / ".forja"
+        forja_dir.mkdir()
+        outcome = {
+            "pass": False,
+            "coverage": 60,
+            "met": ["User registration"],
+            "unmet": [
+                {"requirement": "Pricing model", "type": "business"},
+                "Email notifications",  # string → technical by default
+            ],
+        }
+        (forja_dir / "outcome-report.json").write_text(
+            json.dumps(outcome), encoding="utf-8"
+        )
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        cmd_extract()
+
+        entries = []
+        for fpath in sorted(learnings_dir.glob("*.jsonl")):
+            for line in fpath.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    entries.append(json.loads(line))
+
+        assert len(entries) == 2
+
+        # Find the product-backlog entry
+        product = [e for e in entries if e["category"] == "product-backlog"]
+        technical = [e for e in entries if e["category"] == "unmet-requirement"]
+
+        assert len(product) == 1
+        assert product[0]["severity"] == "low"
+        assert "Product decision needed: Pricing model" in product[0]["learning"]
+        assert "not a code issue" in product[0]["learning"]
+
+        assert len(technical) == 1
+        assert technical[0]["severity"] == "high"
+        assert "Requirement not met: Email notifications" in technical[0]["learning"]
+
+    def test_extracts_deferred_as_product_backlog(self, tmp_path, monkeypatch):
+        """Deferred items from outcome → product-backlog, LOW severity."""
+        monkeypatch.chdir(tmp_path)
+
+        forja_dir = tmp_path / ".forja"
+        forja_dir.mkdir()
+        outcome = {
+            "pass": True,
+            "coverage": 90,
+            "met": ["Auth", "API"],
+            "unmet": [],
+            "deferred": [
+                "Partner integrations (reason: needs business agreement)",
+                {"requirement": "Pricing tiers", "type": "business"},
+            ],
+        }
+        (forja_dir / "outcome-report.json").write_text(
+            json.dumps(outcome), encoding="utf-8"
+        )
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        cmd_extract()
+
+        entries = []
+        for fpath in sorted(learnings_dir.glob("*.jsonl")):
+            for line in fpath.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    entries.append(json.loads(line))
+
+        assert len(entries) == 2
+        assert all(e["category"] == "product-backlog" for e in entries)
+        assert all(e["severity"] == "low" for e in entries)
+        assert all("Product decision needed" in e["learning"] for e in entries)
+
     def test_extracts_assumption_as_actionable(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
 

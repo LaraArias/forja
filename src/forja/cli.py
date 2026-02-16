@@ -13,13 +13,15 @@ Other commands:
     forja init [directory]     # scaffold project (standalone)
     forja plan [prd_path]      # run planner (standalone)
     forja status               # view feature status
-    forja report [directory]   # metrics dashboard
+    forja report               # open observatory dashboard
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import webbrowser
+from pathlib import Path
 
 from forja.config import run_config
 from forja.constants import PRD_PATH
@@ -27,8 +29,37 @@ from forja.init import run_init
 from forja.planner import run_plan
 from forja.runner import run_forja
 from forja.status import show_status
-from forja.utils import setup_logging
+from forja.utils import VERSION, setup_logging
 
+
+# ── Help text ────────────────────────────────────────────────────────
+
+HELP_TEXT = f"""\
+Forja v{VERSION} - Autonomous Software Factory
+
+Commands:
+  forja init            Set up a new project (scaffolding + Plan Mode)
+  forja run             Build the project (spec review \u2192 build \u2192 outcome \u2192 learnings \u2192 observatory)
+  forja status          Show feature progress during or after a build
+  forja report          Open the observatory dashboard in your browser
+  forja config          Configure API keys
+  forja plan            Run Plan Mode standalone (expert panel + PRD generation)
+  forja init --upgrade  Update templates without touching context
+  forja help            Show this help text
+
+Options:
+  --verbose, -v         Enable debug logging
+  --version             Show version
+
+Quick Start:
+  1. forja init         (sets up project, launches Plan Mode automatically)
+  2. forja run          (builds everything)
+
+Documentation: https://github.com/user/forja
+"""
+
+
+# ── Command handlers ─────────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize a Forja project."""
@@ -61,18 +92,36 @@ def cmd_config(args: argparse.Namespace) -> None:
 
 
 def cmd_report(args: argparse.Namespace) -> None:
-    """Generate Forja report (coming soon)."""
-    print("forja report: coming soon")
+    """Open the observatory dashboard in the browser."""
+    html_path = Path(".forja/observatory/evals.html")
+    if not html_path.exists():
+        print("No observatory report found. Run 'forja run' first.")
+        sys.exit(1)
 
+    abs_path = html_path.resolve()
+    print(f"Opening dashboard: {abs_path}")
+    webbrowser.open(f"file://{abs_path}")
+
+
+def cmd_help(args: argparse.Namespace) -> None:
+    """Show help text."""
+    print(HELP_TEXT)
+
+
+# ── CLI entry point ──────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="forja",
         description="Autonomous software factory. PRD in, tested software out.",
+        add_help=True,
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"forja {VERSION}",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -102,16 +151,19 @@ def main() -> None:
     p_status.set_defaults(func=cmd_status)
 
     # report
-    p_report = subparsers.add_parser("report", help="Generate metrics report")
-    p_report.add_argument("directory", nargs="?", default=".", help="Project directory")
+    p_report = subparsers.add_parser("report", help="Open observatory dashboard")
     p_report.set_defaults(func=cmd_report)
+
+    # help
+    p_help = subparsers.add_parser("help", help="Show this help text")
+    p_help.set_defaults(func=cmd_help)
 
     args = parser.parse_args()
     setup_logging(args.verbose)
 
     if not args.command:
-        parser.print_help()
-        sys.exit(1)
+        print(HELP_TEXT)
+        sys.exit(0)
 
     args.func(args)
 

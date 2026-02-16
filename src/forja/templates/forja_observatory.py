@@ -535,11 +535,14 @@ def _print_summary(metrics, html_path):
     minutes = m["total_time_minutes"]
     time_display = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
 
+    deferred_count = len(m.get('outcome_deferred', []))
+    deferred_info = f" | Product items deferred: {deferred_count}" if deferred_count > 0 else ""
+
     print(f"""
 Forja Observatory Report
   Pipeline:  spec-review({m['sr_status']}) plan({m['plan_status']}) build({m['build_status']}) outcome({m['outcome_status']})
   Features:  {m['total_passed']}/{m['total_features']} passed{f" ({m['total_blocked']} blocked)" if m['total_blocked'] > 0 else ""}
-  Coverage:  {m['outcome_coverage']}%
+  Coverage:  Technical {m['outcome_tech_coverage']}%{deferred_info}
   Learnings: {m['learnings_total']} ({m['learnings_high']} high, {m['learnings_med']} med, {m['learnings_low']} low)
   Code:      {m['total_files']} files, {m['total_lines']:,} lines
   Time:      {time_display}

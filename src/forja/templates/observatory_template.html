@@ -192,7 +192,7 @@ function buildPipeline() {
         : 'No data'},
     {name:'Outcome', status:D.outcome_status,
       detail: D.outcome_status!=='skip'
-        ? `${D.outcome_coverage}% coverage`
+        ? `Technical: ${D.outcome_tech_coverage}% coverage` + (D.outcome_deferred&&D.outcome_deferred.length>0?` | ${D.outcome_deferred.length} deferred`:'')
         : 'Skipped'},
     {name:'Learnings', status:D.learnings_status,
       detail: D.learnings_status!=='skip'
@@ -215,10 +215,11 @@ function buildPipeline() {
   html += '</div>';
   // Outcome inline progress bar
   if (D.outcome_status !== 'skip') {
-    const oc = D.outcome_coverage;
+    const tc = D.outcome_tech_coverage;
+    const deferredCount = (D.outcome_deferred||[]).length;
     html += `<div style="max-width:600px;margin:0 0 20px;">
-      <div class="progress-track"><div class="progress-fill" style="width:${oc}%;background:${pctColor(oc)}"></div></div>
-      <div class="progress-label">${oc}% outcome coverage &mdash; ${D.outcome_met.length} met, ${D.outcome_unmet.length} unmet${D.outcome_deferred&&D.outcome_deferred.length>0?', '+D.outcome_deferred.length+' deferred':''}</div>
+      <div class="progress-track"><div class="progress-fill" style="width:${tc}%;background:${pctColor(tc)}"></div></div>
+      <div class="progress-label">Technical coverage: ${tc}% &mdash; ${D.outcome_met.length} met, ${D.outcome_unmet.length} unmet${deferredCount>0?' | Product items deferred: '+deferredCount:''}</div>
     </div>`;
   }
   html += '</div>';
@@ -297,17 +298,17 @@ function buildValidation() {
     }
     html += '</ul></div>';
     // Unmet
-    html += '<div><h3 style="color:var(--error);font-size:.85rem;margin-bottom:8px">Unmet</h3><ul class="req-list">';
+    html += '<div><h3 style="color:var(--error);font-size:.85rem;margin-bottom:8px">Unmet (Technical)</h3><ul class="req-list">';
     if (D.outcome_unmet.length === 0) html += '<li style="color:var(--dim)">None</li>';
     for (const r of D.outcome_unmet.slice(0,15)) {
       html += `<li><span class="icon-unmet">&#10007;</span>${esc(r)}</li>`;
     }
     html += '</ul></div>';
-    // Deferred (business decisions, not buildable by code)
+    // Deferred (business/product decisions, not buildable by code)
     if (D.outcome_deferred && D.outcome_deferred.length > 0) {
-      html += '<div><h3 style="color:var(--warning);font-size:.85rem;margin-bottom:8px">Deferred (Business)</h3><ul class="req-list">';
+      html += '<div><h3 style="color:var(--blue);font-size:.85rem;margin-bottom:8px">Deferred (Product)</h3><ul class="req-list">';
       for (const r of D.outcome_deferred.slice(0,15)) {
-        html += `<li><span style="color:var(--warning);flex-shrink:0">&#9679;</span>${esc(r)}</li>`;
+        html += `<li><span class="icon-deferred">&#9670;</span>${esc(r)}</li>`;
       }
       html += '</ul></div>';
     }
@@ -374,12 +375,26 @@ function buildIntelligence() {
   if (catKeys.length === 0) {
     html += '<div class="no-data">No learnings extracted</div>';
   } else {
-    for (const cat of catKeys) {
+    // Render technical learnings (non-product-backlog) first
+    const techCats = catKeys.filter(c => c !== 'product-backlog');
+    for (const cat of techCats) {
       html += `<div class="learning-group"><h3>${esc(cat)}</h3>`;
       for (const entry of D.learnings_by_cat[cat].slice(0,10)) {
         const sev = (entry.severity||'medium').toLowerCase();
         html += `<div class="learning-entry">
           <span class="sev ${sevClass(sev)}">${sev.toUpperCase()}</span>
+          <span>${esc(entry.learning)}</span>
+        </div>`;
+      }
+      html += '</div>';
+    }
+    // Render product-backlog items separately with blue badges
+    const productItems = D.learnings_by_cat['product-backlog'] || [];
+    if (productItems.length > 0) {
+      html += '<div class="learning-group"><h3 style="color:var(--blue)">Product Backlog</h3>';
+      for (const entry of productItems.slice(0,10)) {
+        html += `<div class="learning-entry">
+          <span class="sev sev-product">PRODUCT</span>
           <span>${esc(entry.learning)}</span>
         </div>`;
       }

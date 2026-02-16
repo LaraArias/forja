@@ -263,6 +263,71 @@ class TestComputeMetricsPipelinePhases:
         assert m["outcome_deferred"] == ["pricing model", "partner integrations"]
         assert len(m["outcome_deferred"]) == 2
 
+    def test_outcome_tech_coverage_excludes_deferred(self):
+        """Technical coverage = met/(met+unmet), deferred items excluded."""
+        outcome = {
+            "coverage": 50,  # raw coverage from LLM (may include deferred)
+            "met": ["auth", "api", "db"],
+            "unmet": ["notifications"],
+            "deferred": ["pricing", "partnerships", "marketing"],
+        }
+        m = _compute_metrics(
+            [], None, None, [], outcome, [], [], {}, 0, 0,
+        )
+        # tech_coverage = 3 / (3 + 1) * 100 = 75%
+        assert m["outcome_tech_coverage"] == 75
+        # 75% >= 50 → warn (not pass since < 80)
+        assert m["outcome_status"] == "warn"
+        # Raw coverage preserved
+        assert m["outcome_coverage"] == 50
+
+    def test_outcome_tech_coverage_all_met(self):
+        """When all technical requirements are met, tech_coverage = 100."""
+        outcome = {
+            "coverage": 60,
+            "met": ["auth", "api"],
+            "unmet": [],
+            "deferred": ["pricing"],
+        }
+        m = _compute_metrics(
+            [], None, None, [], outcome, [], [], {}, 0, 0,
+        )
+        assert m["outcome_tech_coverage"] == 100
+        assert m["outcome_status"] == "pass"
+
+    def test_outcome_tech_coverage_fallback_no_tech_reqs(self):
+        """When no technical reqs (empty met+unmet), falls back to raw coverage."""
+        outcome = {
+            "coverage": 90,
+            "met": [],
+            "unmet": [],
+            "deferred": ["pricing", "partnerships"],
+        }
+        m = _compute_metrics(
+            [], None, None, [], outcome, [], [], {}, 0, 0,
+        )
+        # No technical reqs → fallback to outcome_coverage
+        assert m["outcome_tech_coverage"] == 90
+        assert m["outcome_status"] == "pass"
+
+    def test_outcome_status_uses_tech_coverage_not_raw(self):
+        """outcome_status is based on tech_coverage, not raw coverage."""
+        outcome = {
+            "coverage": 30,  # raw looks bad
+            "met": ["auth", "api", "db", "frontend"],
+            "unmet": ["search"],
+            "deferred": ["pricing", "partnerships", "legal", "marketing",
+                         "sales", "support", "analytics"],
+        }
+        m = _compute_metrics(
+            [], None, None, [], outcome, [], [], {}, 0, 0,
+        )
+        # tech_coverage = 4 / (4 + 1) * 100 = 80% → pass
+        assert m["outcome_tech_coverage"] == 80
+        assert m["outcome_status"] == "pass"
+        # raw coverage is still 30
+        assert m["outcome_coverage"] == 30
+
     def test_learnings_severity_counts(self):
         learnings = [
             {"severity": "high", "category": "error-pattern"},
