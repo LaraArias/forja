@@ -82,12 +82,12 @@ def cmd_review(file_path, spec_path=None):
     # Read code file
     code_file = Path(file_path)
     if not code_file.exists():
-        print(f"{FAIL} Archivo no encontrado: {file_path}")
+        print(f"{FAIL} File not found: {file_path}")
         sys.exit(1)
 
     code = code_file.read_text(encoding="utf-8")
     if not code.strip():
-        print(f"{WARN} Archivo vacío: {file_path}")
+        print(f"{WARN} File is empty: {file_path}")
         sys.exit(0)
 
     # Read spec if provided
@@ -197,7 +197,7 @@ def main():
             i += 1
 
     if not file_path:
-        print("ERROR: Falta --file <path>")
+        print("ERROR: Missing --file <path>")
         sys.exit(1)
 
     cmd_review(file_path, spec_path)

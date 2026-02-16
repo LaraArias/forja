@@ -71,12 +71,45 @@ class ForjaConfig:
 
 # ── TOML parser (minimal, stdlib-only for Python 3.9-3.10 compat) ────
 
+def _parse_value(raw: str) -> str | int | bool:
+    """Parse a TOML value with proper type detection.
+
+    Handles quoted strings (preserving ``#`` inside), booleans,
+    integers (including negative), and bare strings.
+    """
+    stripped = raw.strip()
+
+    # Quoted string — return contents verbatim, no comment stripping
+    if len(stripped) >= 2:
+        if (stripped[0] == '"' and stripped[-1] == '"') or \
+           (stripped[0] == "'" and stripped[-1] == "'"):
+            return stripped[1:-1]
+
+    # Strip inline comments for unquoted values
+    if "#" in stripped:
+        stripped = stripped[:stripped.index("#")].rstrip()
+
+    # Booleans
+    if stripped.lower() == "true":
+        return True
+    if stripped.lower() == "false":
+        return False
+
+    # Integer (including negative)
+    try:
+        return int(stripped)
+    except ValueError:
+        pass
+
+    return stripped
+
+
 def _parse_toml(path: Path) -> dict:
     """Parse a simple TOML file into nested dict.
 
     Supports only the subset Forja uses: [section] headers and
-    key = value lines (strings, integers).  Python 3.11+ has tomllib
-    but we need 3.9+ support.
+    key = value lines (strings, integers, booleans).  Python 3.11+
+    has tomllib but we need 3.9+ support.
     """
     result: dict = {}
     current_section: dict | None = None
@@ -97,26 +130,7 @@ def _parse_toml(path: Path) -> dict:
         if "=" in line and current_section is not None:
             key, _, raw_value = line.partition("=")
             key = key.strip()
-            raw_value = raw_value.strip()
-
-            # Strip inline comments
-            if "#" in raw_value:
-                # Only strip if # is not inside a string
-                if raw_value.startswith('"'):
-                    pass  # leave as-is
-                else:
-                    raw_value = raw_value[:raw_value.index("#")].strip()
-
-            # Parse value
-            if raw_value.startswith('"') and raw_value.endswith('"'):
-                current_section[key] = raw_value[1:-1]
-            elif raw_value.isdigit():
-                current_section[key] = int(raw_value)
-            else:
-                try:
-                    current_section[key] = int(raw_value)
-                except ValueError:
-                    current_section[key] = raw_value
+            current_section[key] = _parse_value(raw_value)
 
     return result
 

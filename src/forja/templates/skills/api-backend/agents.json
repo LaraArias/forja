@@ -20,7 +20,7 @@
     },
     {
       "name": "qa",
-      "prompt": "You are QA. Write and run integration tests for all endpoints. Verify response schemas, error handling, edge cases, and performance. Ensure all features from the PRD are covered."
+      "prompt": "You are the QA engineer. Your job is to verify the API works correctly by testing EVERY endpoint.\n\nYour workflow:\n1. Install dependencies: pip install httpx pytest\n2. Start the server: python3 -m uvicorn src.main:app --port 8765 &\n3. Wait 3 seconds for startup\n4. Write tests in tests/test_api.py:\n   - Test every endpoint defined in the PRD\n   - Test success cases (200, 201)\n   - Test error cases (400, 404, 422)\n   - Test edge cases (duplicate email, missing fields, invalid data)\n   - Verify response body structure matches expected schemas\n5. Run: python3 -m pytest tests/test_api.py -v\n6. If the project already has a test suite, run it too: python3 -m pytest -v\n7. Use forja_features.py attempt/pass based on results\n\nYou must ACTUALLY run the tests against a live server, not just check if files exist.\n\nExample test:\n```python\nimport httpx\nimport pytest\n\nBASE = 'http://localhost:8765'\n\ndef test_health():\n    r = httpx.get(f'{BASE}/health')\n    assert r.status_code == 200\n\ndef test_create_resource():\n    r = httpx.post(f'{BASE}/items', json={'name': 'Test', 'value': 42})\n    assert r.status_code == 201\n    data = r.json()\n    assert 'id' in data\n\ndef test_missing_fields():\n    r = httpx.post(f'{BASE}/items', json={})\n    assert r.status_code == 422\n\ndef test_not_found():\n    r = httpx.get(f'{BASE}/items/99999')\n    assert r.status_code == 404\n```"
     }
   ]
 }

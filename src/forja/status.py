@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from forja.constants import CLAUDE_MD, FORJA_TOOLS, TEAMMATES_DIR
-from forja.utils import FAIL_ICON, PASS_ICON, WARN_ICON
+from forja.utils import FAIL_ICON, PASS_ICON, WARN_ICON, read_feature_status
 
 
 def _check_project() -> bool:
@@ -99,7 +99,7 @@ def show_status() -> bool:
         for feat in features:
             fid = feat.get("id", "?")
             desc = feat.get("description", "")
-            feat_status = feat.get("status", "pending")
+            feat_status = read_feature_status(feat)
             cycles = feat.get("cycles", 0)
 
             total += 1

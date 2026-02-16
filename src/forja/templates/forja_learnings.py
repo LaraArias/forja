@@ -14,6 +14,7 @@ Usage:
 import glob as glob_mod
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,8 +115,32 @@ def cmd_log(category, learning, source, severity):
     print(f"  {DIM}Category: {category} | Source: {source} | File: {fpath}{RESET}")
 
 
+_ACTION_TYPE_PATTERNS = [
+    ("Dependencies to auto-install", re.compile(
+        r"auto-add|dependencies|requirements\.txt|install|bcrypt|python-jose|pytest|httpx|node",
+        re.IGNORECASE,
+    )),
+    ("Validation rules to enforce", re.compile(
+        r"validation rule|code issue|reviewer|prevent this pattern|acceptance criteria",
+        re.IGNORECASE,
+    )),
+    ("PRD patterns to include", re.compile(
+        r"PRD gap|PRD template|unvalidated assumption|requirement not met|explicit.*requirement",
+        re.IGNORECASE,
+    )),
+]
+
+
+def _classify_action_type(learning_text):
+    """Classify a learning into an action type for the manifest."""
+    for action_type, pattern in _ACTION_TYPE_PATTERNS:
+        if pattern.search(learning_text):
+            return action_type
+    return "Other actions"
+
+
 def cmd_manifest():
-    """Generate compact manifest for context injection (max 2000 chars)."""
+    """Generate compact manifest grouped by action type (max 2000 chars)."""
     entries = _read_all_entries()
 
     if not entries:
@@ -123,14 +148,6 @@ def cmd_manifest():
         return
 
     # Sort: high severity first, then by timestamp descending
-    entries.sort(
-        key=lambda e: (
-            SEVERITY_ORDER.get(e.get("severity", "low"), 3),
-            e.get("timestamp", ""),
-        ),
-    )
-    # Reverse timestamp within same severity (most recent first)
-    # Group by severity, reverse each group's timestamps
     by_sev = {}
     for e in entries:
         sev = e.get("severity", "low")
@@ -142,31 +159,43 @@ def cmd_manifest():
         group.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
         sorted_entries.extend(group)
 
+    # Group by action type
+    by_action = {}
+    for entry in sorted_entries:
+        learning = entry.get("learning", "")
+        action_type = _classify_action_type(learning)
+        by_action.setdefault(action_type, []).append(entry)
+
     # Build manifest text, respecting char limit
     lines = ["# Forja Learnings Manifest", ""]
     total_chars = sum(len(l) + 1 for l in lines)
 
-    current_sev = None
-    for entry in sorted_entries:
-        sev = entry.get("severity", "low").upper()
-        cat = entry.get("category", "?")
-        learning = entry.get("learning", "")
-        source = entry.get("source", "?")
+    # Emit in deterministic order
+    section_order = [t for t, _ in _ACTION_TYPE_PATTERNS] + ["Other actions"]
+    for section in section_order:
+        section_entries = by_action.get(section)
+        if not section_entries:
+            continue
 
-        if sev != current_sev:
-            header = f"\n## {sev}"
-            if total_chars + len(header) + 1 > MANIFEST_MAX_CHARS:
-                break
-            lines.append(header)
-            total_chars += len(header) + 1
-            current_sev = sev
-
-        line = f"- [{cat}] {learning} (src: {source})"
-        if total_chars + len(line) + 1 > MANIFEST_MAX_CHARS:
-            lines.append(f"- ... ({len(sorted_entries) - len(lines) + 3} more entries truncated)")
+        header = f"\n## {section}"
+        if total_chars + len(header) + 1 > MANIFEST_MAX_CHARS:
             break
-        lines.append(line)
-        total_chars += len(line) + 1
+        lines.append(header)
+        total_chars += len(header) + 1
+
+        for entry in section_entries:
+            learning = entry.get("learning", "")
+            sev = entry.get("severity", "low").upper()
+            line = f"- [{sev}] {learning}"
+            if total_chars + len(line) + 1 > MANIFEST_MAX_CHARS:
+                remaining = len(sorted_entries) - sum(
+                    1 for l in lines if l.startswith("- [")
+                )
+                lines.append(f"- ... ({remaining} more entries truncated)")
+                total_chars += 50
+                break
+            lines.append(line)
+            total_chars += len(line) + 1
 
     manifest = "\n".join(lines)
     print(manifest)
@@ -201,8 +230,48 @@ def _try_append(category, learning, source, severity, existing, counts):
     print(f"  {color}[{category}]{RESET} {learning[:90]}")
 
 
+_AUTH_KEYWORDS = re.compile(r"auth|login|jwt|token|password|session|oauth", re.IGNORECASE)
+_DB_KEYWORDS = re.compile(r"database|model|migration|schema|table|sql|orm", re.IGNORECASE)
+_TEST_KEYWORDS = re.compile(r"test|qa|integration|e2e|endpoint.?pass", re.IGNORECASE)
+_FRONTEND_KEYWORDS = re.compile(r"frontend|html|css|js|react|vue|angular|webpack|vite", re.IGNORECASE)
+
+
+def _infer_error_pattern_action(desc, teammate, cycles):
+    """Infer an actionable learning from a feature that required many cycles."""
+    text = f"{desc} {teammate}"
+    if _AUTH_KEYWORDS.search(text):
+        return (
+            f"Auto-add authentication dependencies (bcrypt, python-jose) to "
+            f"requirements.txt before auth features start. "
+            f"Feature '{desc}' ({teammate}) failed {cycles} cycles due to "
+            f"missing dependencies."
+        )
+    if _DB_KEYWORDS.search(text):
+        return (
+            f"Run database initialization and create tables before database "
+            f"features start. Feature '{desc}' ({teammate}) failed {cycles} "
+            f"cycles due to missing schema setup."
+        )
+    if _TEST_KEYWORDS.search(text):
+        return (
+            f"Install test dependencies (pytest, httpx) before QA starts. "
+            f"Pre-create test fixtures. Feature '{desc}' ({teammate}) failed "
+            f"{cycles} cycles due to missing test infrastructure."
+        )
+    if _FRONTEND_KEYWORDS.search(text):
+        return (
+            f"Verify node is available and install frontend tooling before "
+            f"frontend features start. Feature '{desc}' ({teammate}) failed "
+            f"{cycles} cycles due to missing frontend setup."
+        )
+    return (
+        f"Feature '{desc}' ({teammate}) required {cycles} cycles. "
+        f"Add explicit acceptance criteria with input/output examples to PRD."
+    )
+
+
 def cmd_extract():
-    """Post-run automatic extraction of learnings from ALL artifact sources."""
+    """Post-run automatic extraction of actionable learnings from ALL artifact sources."""
     existing = _existing_learning_texts()
     counts = {}
 
@@ -218,7 +287,11 @@ def cmd_extract():
                 desc = gap.get("description") or gap.get("gap") or gap.get("title", "")
                 if not desc:
                     continue
-                learning = f"Spec gap (HIGH): {desc}"
+                suggestion = gap.get("suggestion", "add explicit specification")
+                learning = (
+                    f"PRD gap found: {desc}. Auto-fix: {suggestion}. "
+                    f"Add this to PRD template for future projects."
+                )
                 _try_append("spec-gap", learning, "spec-enrichment.json", "high",
                             existing, counts)
         except (json.JSONDecodeError, OSError):
@@ -242,7 +315,10 @@ def cmd_extract():
                     answer = ans.get("answer", "")
                     if not answer:
                         continue
-                    learning = f"Assumption: {question} → {answer}" if question else f"Assumption: {answer}"
+                    learning = (
+                        f"Unvalidated assumption: {question} -> Default: {answer}. "
+                        f"Action: validate with stakeholder or add to PRD as explicit requirement."
+                    )
                     _try_append("assumption", learning, "plan-transcript.json", "medium",
                                 existing, counts)
         except (json.JSONDecodeError, OSError):
@@ -259,14 +335,8 @@ def cmd_extract():
             for f in features:
                 cycles = f.get("cycles", 0)
                 if cycles > 2:
-                    fid = f.get("id", "?")
-                    desc = f.get("description", f.get("name", fid))
-                    feat_status = f.get("status", "pending")
-                    status = "eventually passed" if feat_status == "passed" else "still failing"
-                    learning = (
-                        f"Feature '{desc}' ({teammate}) took {cycles} cycles "
-                        f"({status}) - investigate recurring failure pattern"
-                    )
+                    desc = f.get("description", f.get("name", f.get("id", "?")))
+                    learning = _infer_error_pattern_action(desc, teammate, cycles)
                     _try_append("error-pattern", learning,
                                 f"features.json/{teammate}", "medium",
                                 existing, counts)
@@ -287,7 +357,10 @@ def cmd_extract():
                     continue
                 if not desc:
                     continue
-                learning = f"Unmet requirement: {desc}"
+                learning = (
+                    f"Requirement not met: {desc}. Action: add as explicit "
+                    f"feature with acceptance criteria: [input] -> [expected output]."
+                )
                 _try_append("unmet-requirement", learning,
                             "outcome-report.json", "high",
                             existing, counts)
@@ -309,7 +382,11 @@ def cmd_extract():
                 desc = issue.get("description") or issue.get("issue") or issue.get("title", "")
                 if not desc:
                     continue
-                learning = f"Cross-model finding: {desc}"
+                file_ref = issue.get("file", fname)
+                learning = (
+                    f"Code issue found by reviewer: {desc} in {file_ref}. "
+                    f"Action: add validation rule to prevent this pattern."
+                )
                 _try_append("kimi-finding", learning,
                             f"crossmodel/{fname}", "high",
                             existing, counts)

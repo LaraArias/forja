@@ -24,7 +24,7 @@ from forja.constants import (
 )
 from forja.utils import (
     BOLD, CYAN, DIM, GREEN, RED, YELLOW, RESET,
-    gather_context, load_dotenv, safe_read_json,
+    gather_context, load_dotenv, read_feature_status, safe_read_json,
 )
 
 # ── Placeholder detection ────────────────────────────────────────────
@@ -419,7 +419,7 @@ def _monitor_progress(stop_event, start_time, timeout_event=None):
                     fid = feat.get("id", "?")
                     key = f"{teammate_name}/{fid}"
                     total += 1
-                    feat_status = feat.get("status", "pending")
+                    feat_status = read_feature_status(feat)
                     if feat_status == "blocked":
                         blocked += 1
                         if key not in last_status or last_status[key] != "blocked":
@@ -518,7 +518,7 @@ def _count_features():
             continue
         for feat in features:
             total += 1
-            feat_status = feat.get("status", "pending")
+            feat_status = read_feature_status(feat)
             if feat_status == "blocked":
                 blocked += 1
             elif feat_status == "passed":
@@ -799,11 +799,7 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     )
     monitor.start()
 
-    log_path = Path(".forja/logs/build.log")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
     timed_out = False
-    build_log_file = open(log_path, "w")
     try:
         proc = subprocess.Popen(
             [
@@ -813,8 +809,6 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
                 "--output-format", "text",
             ],
             env=env,
-            stdout=build_log_file,
-            stderr=subprocess.STDOUT,
             preexec_fn=os.setsid,
         )
 
@@ -841,17 +835,28 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
         print(f"\n{YELLOW}  Interrupted by user.{RESET}")
         stop_event.set()
         monitor.join(timeout=3)
-        build_log_file.close()
         _stop_observatory_live(observatory_proc)
         return False
     finally:
         stop_event.set()
         monitor.join(timeout=3)
-        build_log_file.close()
 
     build_elapsed = time.time() - build_start
     print()
-    print(f"  {DIM}Build log: {log_path}{RESET}")
+
+    # Save git log as build record
+    import subprocess as sp
+    try:
+        project_dir = Path.cwd()
+        git_log = sp.run(
+            ["git", "log", "--oneline", "-20"],
+            capture_output=True, text=True, cwd=project_dir,
+        )
+        log_path = Path(".forja/logs/build-commits.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(git_log.stdout)
+    except Exception:
+        pass
 
     # Stop observatory live
     _stop_observatory_live(observatory_proc)

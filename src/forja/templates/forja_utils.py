@@ -279,3 +279,27 @@ def extract_content(response):
         return response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         return None
+
+
+# ── Feature status ─────────────────────────────────────────────────
+
+
+def read_feature_status(feat):
+    """Canonical way to read feature status.
+
+    Handles both the new string ``status`` field and the legacy boolean
+    ``passes``/``blocked`` fields for backward compatibility.
+
+    Returns one of: "pending", "passed", "failed", "blocked".
+    """
+    status = feat.get("status")
+    if status in ("pending", "passed", "failed", "blocked"):
+        return status
+    # Fallback: old boolean schema
+    if feat.get("blocked"):
+        return "blocked"
+    if feat.get("passes") or feat.get("passed"):
+        return "passed"
+    if feat.get("cycles", 0) > 0:
+        return "failed"
+    return "pending"

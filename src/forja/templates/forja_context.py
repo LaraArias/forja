@@ -187,13 +187,13 @@ def _parse_value(raw):
 def cmd_get(args):
     """Read a variable's value."""
     if len(args) < 1:
-        print("ERROR: Falta key")
+        print("ERROR: Missing key")
         sys.exit(1)
 
     key = args[0]
     data = _load_var(key)
     if data is None:
-        print(f"ERROR: Key '{key}' no encontrada")
+        print(f"ERROR: Key '{key}' not found")
         sys.exit(1)
 
     val = data["value"]
@@ -206,7 +206,7 @@ def cmd_get(args):
 def cmd_set(args):
     """Create or update a variable."""
     if len(args) < 2:
-        print("ERROR: Falta key y/o value")
+        print("ERROR: Missing key and/or value")
         sys.exit(1)
 
     key = args[0]
@@ -250,7 +250,7 @@ def cmd_set(args):
         _save_var(data)
         _update_ontology()
 
-    action = "actualizada" if version > 1 else "creada"
+    action = "updated" if version > 1 else "created"
     print(f"{key}: {action} (v{version} by {author})")
 
 
@@ -261,7 +261,7 @@ def cmd_list(args):
     matches = [v for v in variables if v["key"].startswith(prefix)]
 
     if not matches:
-        print("Sin variables" + (f" con prefix '{prefix}'" if prefix else ""))
+        print("No variables" + (f" with prefix '{prefix}'" if prefix else ""))
         return
 
     for var in matches:
@@ -274,7 +274,7 @@ def cmd_list(args):
 def cmd_search(args):
     """Search keys and values for a term."""
     if not args:
-        print("ERROR: Falta term")
+        print("ERROR: Missing term")
         sys.exit(1)
 
     term = args[0].lower()
@@ -291,14 +291,14 @@ def cmd_search(args):
             matches.append(var)
 
     if not matches:
-        print(f"Sin resultados para '{args[0]}'")
+        print(f"No results for '{args[0]}'")
         return
 
     for var in matches:
         val_str = _compact_value(var["value"])
         print(f"  {var['key']}: {val_str}  (by {var.get('author', '?')})")
 
-    print(f"\n{len(matches)} resultado{'s' if len(matches) != 1 else ''}")
+    print(f"\n{len(matches)} result{'s' if len(matches) != 1 else ''}")
 
 
 def cmd_manifest(args):
@@ -306,7 +306,7 @@ def cmd_manifest(args):
     variables = _all_vars()
 
     if not variables:
-        print("(sin variables en context store)")
+        print("(no variables in context store)")
         return
 
     for var in variables:
@@ -321,7 +321,7 @@ def cmd_health(args):
     variables = _all_vars()
 
     if not variables:
-        print("Context store vacío")
+        print("Context store is empty")
         return
 
     count = len(variables)
@@ -345,9 +345,9 @@ def cmd_health(args):
     print("Context Store Health")
     print("====================\n")
     print(f"  Variables:           {count}")
-    print(f"  Última actualización: {last_update}")
-    print(f"  Versión promedio:    {avg_version:.1f}")
-    print(f"  Autores:             {len(authors)}")
+    print(f"  Last updated:        {last_update}")
+    print(f"  Average version:     {avg_version:.1f}")
+    print(f"  Authors:             {len(authors)}")
     for author, n in sorted(authors.items()):
         print(f"    {author}: {n} variable{'s' if n != 1 else ''}")
 
@@ -355,7 +355,7 @@ def cmd_health(args):
 def cmd_history(args):
     """Show version history for a key."""
     if not args:
-        print("ERROR: Falta key")
+        print("ERROR: Missing key")
         sys.exit(1)
 
     key = args[0]
@@ -373,10 +373,10 @@ def cmd_history(args):
     current = _load_var(key)
 
     if not history and current is None:
-        print(f"ERROR: Key '{key}' no encontrada")
+        print(f"ERROR: Key '{key}' not found")
         sys.exit(1)
 
-    print(f"Historia de: {key}\n")
+    print(f"History for: {key}\n")
 
     for entry in history:
         val_str = _compact_value(entry["value"])
@@ -387,11 +387,11 @@ def cmd_history(args):
     if current:
         val_str = _compact_value(current["value"])
         ts = current.get("updated_at", current.get("created_at", "?"))
-        print(f"  v{current.get('version', '?')}  {ts}  by {current.get('author', '?')}  ← actual")
+        print(f"  v{current.get('version', '?')}  {ts}  by {current.get('author', '?')}  ← current")
         print(f"      {val_str}")
 
     total = len(history) + (1 if current else 0)
-    print(f"\n{total} versión{'es' if total != 1 else ''}")
+    print(f"\n{total} version{'s' if total != 1 else ''}")
 
 
 def cmd_export(args):
@@ -410,7 +410,7 @@ def cmd_export(args):
             i += 1
 
     if not output:
-        print("ERROR: Falta --output <file>")
+        print("ERROR: Missing --output <file>")
         sys.exit(1)
 
     variables = _all_vars()
@@ -424,7 +424,7 @@ def cmd_export(args):
     }
 
     _atomic_write(Path(output), json.dumps(export_data, indent=2, ensure_ascii=False) + "\n")
-    print(f"Exportadas {len(matches)} variables a {output}")
+    print(f"Exported {len(matches)} variables to {output}")
 
 
 def cmd_probe(args):
@@ -432,7 +432,7 @@ def cmd_probe(args):
     variables = _all_vars()
 
     if not variables:
-        print("PROBE: Sin variables en context store")
+        print("PROBE: No variables in context store")
         return
 
     # Sort by updated_at descending
@@ -446,7 +446,7 @@ def cmd_probe(args):
         val_str = _compact_value(var["value"], max_len=40)
         parts.append(f"{var['key']}={val_str}")
 
-    print(f"PROBE: Verifica que estas decisiones siguen vigentes: {', '.join(parts)}")
+    print(f"PROBE: Verify these decisions are still valid: {', '.join(parts)}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────

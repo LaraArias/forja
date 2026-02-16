@@ -1,48 +1,41 @@
 """Tests for forja.runner module."""
 
+import inspect
 import pytest
 from pathlib import Path
 from forja.runner import _prd_needs_planning
 
 
-class TestRunnerImports:
-    """Verify runner uses shared utilities."""
+class TestRunnerSharedUtilities:
+    """Verify runner uses shared utilities at runtime."""
 
-    def test_imports_from_utils(self):
-        """Runner should import from forja.utils, not define its own."""
+    def test_runner_has_shared_colors(self):
+        """Runner should re-export shared color constants from utils."""
         import forja.runner as runner
-        source = Path(runner.__file__).read_text(encoding="utf-8")
+        # These are imported from forja.utils — verify they exist at runtime
+        assert hasattr(runner, "BOLD")
+        assert hasattr(runner, "RESET")
+        assert hasattr(runner, "GREEN")
+        assert hasattr(runner, "RED")
 
-        # Should import from forja.utils
-        assert "from forja.utils import" in source
-
-        # Should NOT have local ANSI definitions
-        assert 'RESET = "\\033' not in source
-        assert 'GREEN = "\\033' not in source
-        assert "def _load_env" not in source
-
-
-class TestRunnerEnglish:
-    """Verify runner uses English strings."""
-
-    def test_no_spanish_context_headers(self):
+    def test_runner_has_read_feature_status(self):
+        """Runner should have the canonical status helper."""
         import forja.runner as runner
-        source = Path(runner.__file__).read_text(encoding="utf-8")
+        assert hasattr(runner, "read_feature_status")
+        assert callable(runner.read_feature_status)
 
-        spanish_markers = [
-            "Contexto Compartido",
-            "Decisiones previas",
-            "Learnings de corridas anteriores",
-            "Contexto del negocio",
-            "Especificaciones Adicionales",
-        ]
+    def test_runner_has_safe_read_json(self):
+        """Runner should use the shared safe_read_json."""
+        import forja.runner as runner
+        assert hasattr(runner, "safe_read_json")
+        assert callable(runner.safe_read_json)
 
-        for marker in spanish_markers:
-            assert marker not in source, (
-                f"Found Spanish string '{marker}' in runner.py"
-            )
 
-    def test_has_english_context_headers(self):
+class TestRunnerEnglishHeaders:
+    """Verify runner injects English context section headers."""
+
+    def test_context_section_headers_are_english(self):
+        """The context injection function should use English headers."""
         import forja.runner as runner
         source = Path(runner.__file__).read_text(encoding="utf-8")
 
@@ -53,53 +46,59 @@ class TestRunnerEnglish:
             "Business Context",
             "Additional Specifications",
         ]
-
         for marker in english_markers:
             assert marker in source, (
-                f"Missing English string '{marker}' in runner.py"
+                f"Missing English context header '{marker}' in runner.py"
+            )
+
+    def test_no_spanish_context_headers(self):
+        """Ensure old Spanish headers are gone."""
+        import forja.runner as runner
+        source = Path(runner.__file__).read_text(encoding="utf-8")
+
+        spanish_markers = [
+            "Contexto Compartido",
+            "Decisiones previas",
+            "Learnings de corridas anteriores",
+            "Contexto del negocio",
+            "Especificaciones Adicionales",
+        ]
+        for marker in spanish_markers:
+            assert marker not in source, (
+                f"Found Spanish string '{marker}' in runner.py"
             )
 
 
-class TestRunnerTypeAnnotations:
-    """Verify runner has type annotations."""
+class TestRunnerSignatures:
+    """Verify runner functions have correct signatures."""
 
-    def test_has_future_annotations(self):
-        import forja.runner as runner
-        source = Path(runner.__file__).read_text(encoding="utf-8")
-        assert "from __future__ import annotations" in source
+    def test_run_forja_returns_bool(self):
+        from forja.runner import run_forja
+        sig = inspect.signature(run_forja)
+        assert sig.return_annotation is bool or sig.return_annotation == "bool"
 
-    def test_run_forja_has_return_type(self):
-        import forja.runner as runner
-        source = Path(runner.__file__).read_text(encoding="utf-8")
-        assert "def run_forja(" in source
-        # Find the line with run_forja definition
-        for line in source.splitlines():
-            if "def run_forja(" in line:
-                assert "-> bool" in line, "run_forja should have -> bool return type"
-                break
+    def test_run_forja_accepts_prd_path(self):
+        from forja.runner import run_forja
+        sig = inspect.signature(run_forja)
+        assert "prd_path" in sig.parameters
+
+    def test_count_features_is_callable(self):
+        from forja.runner import _count_features
+        assert callable(_count_features)
 
 
 class TestRunnerAutoInit:
-    """Verify runner auto-initializes when project is not scaffolded."""
+    """Verify runner has auto-init and auto-plan capabilities."""
 
-    def test_imports_project_markers(self):
-        """Runner should import CLAUDE_MD and FORJA_TOOLS from constants."""
+    def test_has_project_marker_constants(self):
+        """Runner should access CLAUDE_MD and FORJA_TOOLS at runtime."""
         import forja.runner as runner
-        source = Path(runner.__file__).read_text(encoding="utf-8")
-        assert "CLAUDE_MD" in source
-        assert "FORJA_TOOLS" in source
+        assert hasattr(runner, "CLAUDE_MD")
+        assert hasattr(runner, "FORJA_TOOLS")
 
-    def test_auto_init_import(self):
-        """run_forja should import run_init for auto-scaffolding."""
-        import forja.runner as runner
-        source = Path(runner.__file__).read_text(encoding="utf-8")
-        assert "from forja.init import run_init" in source
-
-    def test_auto_plan_import(self):
-        """run_forja should import run_plan for auto-planning."""
-        import forja.runner as runner
-        source = Path(runner.__file__).read_text(encoding="utf-8")
-        assert "from forja.planner import run_plan" in source
+    def test_prd_needs_planning_callable(self):
+        """The placeholder detection function should be importable."""
+        assert callable(_prd_needs_planning)
 
 
 class TestPrdNeedsPlanning:

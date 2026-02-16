@@ -144,3 +144,5 @@ If QA fails: identify which teammate should fix, send feedback, re-activate.
 - QA timeout: if QA runs for more than 10 minutes without marking its feature, kill QA and close the run. 11/12 features is acceptable.
 - If a feature reaches 5 failed validation cycles, it is automatically blocked. Move on to the next feature. Do not retry blocked features. Blocked features are noted in the final report. 12/15 completed features is acceptable - do not waste time on stuck features.
 - The validator supports multiple languages (.py, .js, .ts, .html, .json, .css, .cs, .java, .go, .rs, etc). Unknown file types always pass validation. Never assume only Python is being built.
+- For frontend projects: QA agent uses Playwright for browser testing. Helper available at .forja-tools/forja_qa_playwright.py. Screenshots saved to .forja/screenshots/. QA report at .forja/qa-report.json.
+- For API projects: QA agent uses httpx to test every endpoint against a live server. Tests must verify status codes AND response bodies.

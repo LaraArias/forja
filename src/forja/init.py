@@ -41,6 +41,7 @@ TEMPLATES = [
     ("forja_specreview.py", ".forja-tools/forja_specreview.py"),
     ("forja_outcome.py", ".forja-tools/forja_outcome.py"),
     ("forja_learnings.py", ".forja-tools/forja_learnings.py"),
+    ("forja_qa_playwright.py", ".forja-tools/forja_qa_playwright.py"),
     ("forja.toml.default", "forja.toml"),
 ]
 
@@ -366,9 +367,21 @@ def run_init(directory: str = ".", force: bool = False, upgrade: bool = False) -
     print("\n── Preflight ──")
     _run_preflight(target)
 
-    # Step 8: Final message
+    # Step 8: Scaffold complete
     print()
     print(f"{PASS_ICON} Forja initialized.")
+
+    # Step 9: Auto-launch planning
+    from forja.planner import run_plan  # local import to avoid circular dep
+
+    print(f"\n{BOLD}── Starting Plan Mode ──{RESET}\n")
+    plan_ok = run_plan(prd_path=str(target / PRD_PATH), _called_from_runner=False)
+    if plan_ok:
+        print(f"\n{PASS_ICON} Project initialized and PRD ready.")
+        print(f"  Run {BOLD}forja run{RESET} to start the build.\n")
+    else:
+        print(f"\n{WARN_ICON} Planning skipped or cancelled.")
+        print(f"  Write your PRD in context/prd.md, then run {BOLD}forja run{RESET}.\n")
 
     return True
 

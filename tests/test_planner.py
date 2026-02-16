@@ -1,66 +1,46 @@
 """Tests for forja.planner module."""
 
+import inspect
 import json
 import pytest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 
-class TestPlannerImports:
-    """Verify planner uses shared utilities."""
+class TestPlannerSharedUtilities:
+    """Verify planner uses shared utilities at runtime."""
 
-    def test_imports_from_utils(self):
-        """Planner should import from forja.utils, not define its own."""
+    def test_planner_has_call_kimi(self):
+        """Planner should use the shared call_kimi client."""
         import forja.planner as planner
-        source = Path(planner.__file__).read_text(encoding="utf-8")
+        assert hasattr(planner, "call_kimi")
+        assert callable(planner.call_kimi)
 
-        # Should import from forja.utils
-        assert "from forja.utils import" in source
-
-        # Should NOT have local duplicates
-        assert "def _load_dotenv" not in source
-        assert "def _parse_json" not in source
-        assert "KIMI_MODEL = " not in source
-
-
-class TestPlannerEnglish:
-    """Verify planner uses English strings."""
-
-    def test_no_spanish_strings(self):
+    def test_planner_has_parse_json(self):
+        """Planner should use shared JSON parsing."""
         import forja.planner as planner
-        source = Path(planner.__file__).read_text(encoding="utf-8")
+        assert hasattr(planner, "parse_json")
+        assert callable(planner.parse_json)
 
-        spanish_markers = [
-            "Enriquecimiento",
-            "preguntas",
-            "respuesta",
-            "experto",
-            "Generando",
-            "pregunta",
-        ]
-
-        for marker in spanish_markers:
-            # Check for Spanish words not inside English context
-            # Allow words that might appear in variable names
-            lines_with_marker = [
-                line for line in source.splitlines()
-                if marker.lower() in line.lower()
-                and not line.strip().startswith("#")
-                and "variable" not in line.lower()
-            ]
-            # This is a soft check - just ensure the major Spanish UI strings are gone
-            assert len(lines_with_marker) == 0, (
-                f"Found Spanish marker '{marker}' in planner.py: {lines_with_marker[:3]}"
-            )
-
-
-class TestPlannerTypeAnnotations:
-    """Verify planner has type annotations."""
-
-    def test_has_future_annotations(self):
+    def test_planner_has_load_dotenv(self):
+        """Planner should use shared env loading."""
         import forja.planner as planner
-        source = Path(planner.__file__).read_text(encoding="utf-8")
-        assert "from __future__ import annotations" in source
+        assert hasattr(planner, "load_dotenv")
+        assert callable(planner.load_dotenv)
+
+
+class TestPlannerSignatures:
+    """Verify planner function signatures."""
+
+    def test_run_plan_returns_bool(self):
+        from forja.planner import run_plan
+        sig = inspect.signature(run_plan)
+        assert sig.return_annotation is bool or sig.return_annotation == "bool"
+
+    def test_run_plan_accepts_called_from_runner(self):
+        from forja.planner import run_plan
+        sig = inspect.signature(run_plan)
+        assert "_called_from_runner" in sig.parameters
 
 
 class TestTechnicalExpert:

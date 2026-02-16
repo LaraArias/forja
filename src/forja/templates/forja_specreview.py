@@ -239,12 +239,12 @@ def cmd_specreview(prd_path, output_format="text"):
     # 1. Read PRD
     prd_file = Path(prd_path)
     if not prd_file.exists():
-        print(f"{FAIL_ICON} PRD no encontrado: {prd_path}")
+        print(f"{FAIL_ICON} PRD not found: {prd_path}")
         sys.exit(1)
 
     prd_content = prd_file.read_text(encoding="utf-8")
     if not prd_content.strip():
-        print(f"{FAIL_ICON} PRD vacío: {prd_path}")
+        print(f"{FAIL_ICON} PRD is empty: {prd_path}")
         sys.exit(1)
 
     print(f"Reviewing PRD: {prd_path}")

@@ -450,3 +450,27 @@ def print_warning(msg: str) -> None:
 def print_success(msg: str) -> None:
     """Print a success message in green."""
     print(f"  {GREEN}{msg}{RESET}")
+
+
+# ── Feature status ─────────────────────────────────────────────────
+
+
+def read_feature_status(feat: dict) -> str:
+    """Canonical way to read feature status.
+
+    Handles both the new string ``status`` field and the legacy boolean
+    ``passes``/``blocked`` fields for backward compatibility.
+
+    Returns one of: ``"pending"``, ``"passed"``, ``"failed"``, ``"blocked"``.
+    """
+    status = feat.get("status")
+    if status in ("pending", "passed", "failed", "blocked"):
+        return status
+    # Fallback: old boolean schema
+    if feat.get("blocked"):
+        return "blocked"
+    if feat.get("passes") or feat.get("passed"):
+        return "passed"
+    if feat.get("cycles", 0) > 0:
+        return "failed"
+    return "pending"
