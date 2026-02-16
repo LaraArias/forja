@@ -15,8 +15,9 @@ TEAMMATES_DIR = Path("context/teammates")
 FORJA_DIR = Path(".forja")
 WORKFLOW_PATH = FORJA_DIR / "workflow.json"
 
-# ── LLM model identifiers (defaults, overridden by config_loader) ──
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+# ── LLM model identifiers ──
+# Model names are managed by config_loader.py (see _DEFAULTS dict).
+# Templates use their own constants since they run without forja imports.
 
 # ── Project markers (used to detect an existing Forja project) ──
 PROJECT_MARKERS = [CLAUDE_MD, FORJA_TOOLS]

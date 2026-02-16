@@ -11,6 +11,7 @@ import os
 import re
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -34,13 +35,30 @@ PASS_ICON = f"{GREEN}[PASS]{RESET}"
 FAIL_ICON = f"{RED}[FAIL]{RESET}"
 WARN_ICON = f"{YELLOW}[WARN]{RESET}"
 
-# ── LLM constants ───────────────────────────────────────────────────
+# ── LLM constants (overridden by FORJA_MODELS_* env vars) ──────────
 
-KIMI_MODEL = "kimi-k2-0711-preview"
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_KIMI_MODEL = "kimi-k2-0711-preview"
+_DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_OPENAI_MODEL = "gpt-4o"
 KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+
+
+def _get_model(provider):
+    """Return the model name for a provider, respecting env var overrides."""
+    if provider == "kimi":
+        return os.environ.get("FORJA_MODELS_KIMI_MODEL", _DEFAULT_KIMI_MODEL)
+    if provider == "anthropic":
+        return os.environ.get("FORJA_MODELS_ANTHROPIC_MODEL", _DEFAULT_ANTHROPIC_MODEL)
+    if provider == "openai":
+        return os.environ.get("FORJA_MODELS_OPENAI_MODEL", os.environ.get("OPENAI_MODEL", _DEFAULT_OPENAI_MODEL))
+    return ""
+
+
+# Backward-compatible aliases
+KIMI_MODEL = _DEFAULT_KIMI_MODEL
+ANTHROPIC_MODEL = _DEFAULT_ANTHROPIC_MODEL
 
 # ── .env loading ────────────────────────────────────────────────────
 
@@ -99,6 +117,21 @@ def load_dotenv(paths=None):
 
 # ── LLM client ──────────────────────────────────────────────────────
 
+_SECRET_PATTERNS = re.compile(
+    r"bearer|authorization|api[-_]?key|x-api-key|secret",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_error_body(body):
+    """Truncate API error body and strip lines that may contain secrets."""
+    safe_lines = []
+    for line in body[:500].splitlines():
+        if _SECRET_PATTERNS.search(line):
+            continue
+        safe_lines.append(line)
+    return "\n".join(safe_lines)[:100]
+
 
 def _call_kimi_raw(prompt, system, model):
     """Call Kimi API. Raises on failure for auto-fallback."""
@@ -138,15 +171,17 @@ def _call_kimi_raw(prompt, system, model):
     except urllib.error.HTTPError as e:
         error_body = ""
         try:
-            error_body = e.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        raise RuntimeError(f"Kimi: HTTP {e.code} {error_body}") from e
+            error_body = e.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            print(f"  reading Kimi error body: {exc}", file=sys.stderr)
+        raise RuntimeError(f"Kimi: HTTP {e.code} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"Kimi timeout/network: {e}") from e
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        raise RuntimeError("Kimi: unexpected response format") from e
 
 
-def _call_anthropic_raw(prompt, system, model):
+def _call_anthropic_raw(prompt, system, model, tools=None):
     """Call Anthropic API. Raises on failure for auto-fallback."""
     load_dotenv()
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -160,6 +195,8 @@ def _call_anthropic_raw(prompt, system, model):
     }
     if system:
         body_dict["system"] = system
+    if tools:
+        body_dict["tools"] = tools
 
     payload = json.dumps(body_dict).encode("utf-8")
 
@@ -190,12 +227,14 @@ def _call_anthropic_raw(prompt, system, model):
     except urllib.error.HTTPError as e:
         error_body = ""
         try:
-            error_body = e.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        raise RuntimeError(f"Anthropic: HTTP {e.code} {error_body}") from e
+            error_body = e.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            print(f"  reading Anthropic error body: {exc}", file=sys.stderr)
+        raise RuntimeError(f"Anthropic: HTTP {e.code} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"Anthropic timeout/network: {e}") from e
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        raise RuntimeError("Anthropic: unexpected response format") from e
 
 
 def _call_openai_raw(prompt, system, model):
@@ -236,39 +275,56 @@ def _call_openai_raw(prompt, system, model):
     except urllib.error.HTTPError as e:
         error_body = ""
         try:
-            error_body = e.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        raise RuntimeError(f"OpenAI: HTTP {e.code} {error_body}") from e
+            error_body = e.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            print(f"  reading OpenAI error body: {exc}", file=sys.stderr)
+        raise RuntimeError(f"OpenAI: HTTP {e.code} {_sanitize_error_body(error_body)}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"OpenAI timeout/network: {e}") from e
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        raise RuntimeError("OpenAI: unexpected response format") from e
 
 
-def _call_provider(prompt, system, provider, model):
+def _call_provider(prompt, system, provider, model, tools=None):
     """Dispatch to the appropriate provider's raw function."""
     if provider == "kimi":
-        return _call_kimi_raw(prompt, system, model or KIMI_MODEL)
+        return _call_kimi_raw(prompt, system, model or _get_model("kimi"))
     elif provider == "anthropic":
-        return _call_anthropic_raw(prompt, system, model or ANTHROPIC_MODEL)
+        return _call_anthropic_raw(prompt, system, model or _get_model("anthropic"), tools=tools)
     elif provider == "openai":
-        return _call_openai_raw(prompt, system, model or os.environ.get("OPENAI_MODEL", "gpt-4o"))
+        return _call_openai_raw(prompt, system, model or _get_model("openai"))
     raise ValueError(f"Unknown provider: {provider}")
 
 
-def call_llm(prompt, system="", provider="auto", model=None):
-    """Call an LLM provider.
+def call_llm(prompt, system="", provider="auto", model=None, max_retries=2):
+    """Call an LLM provider with retry and exponential backoff.
 
     provider can be 'kimi', 'anthropic', 'openai', or 'auto'.
     Auto tries kimi first, falls back to anthropic, then openai.
+    Each provider is retried up to max_retries times with exponential backoff.
     """
     if provider == "auto":
-        for p in ["kimi", "anthropic", "openai"]:
+        providers = ["kimi", "anthropic", "openai"]
+    else:
+        providers = [provider]
+
+    last_error = None
+    for p in providers:
+        p = p.strip()
+        for attempt in range(max_retries + 1):
             try:
                 return _call_provider(prompt, system, p, model)
-            except Exception:
-                continue
-        return ""
-    return _call_provider(prompt, system, provider, model)
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    delay = min(2 ** attempt, 8)
+                    time.sleep(delay)
+                    continue
+                break
+
+    if provider != "auto" and last_error is not None:
+        raise last_error
+    return ""
 
 
 # Backward-compatible wrappers

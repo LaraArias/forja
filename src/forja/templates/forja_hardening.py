@@ -25,6 +25,7 @@ from pathlib import Path
 from forja_utils import (
     load_dotenv, call_provider, extract_content, parse_json_array,
     PASS_ICON, FAIL_ICON, WARN_ICON,
+    KIMI_API_URL, _get_model,
 )
 
 PASS = PASS_ICON
@@ -42,8 +43,8 @@ HTTP_TIMEOUT = 10
 
 KIMI_PROVIDER = {
     "name": "Kimi (Moonshot AI)",
-    "url": "https://api.moonshot.ai/v1/chat/completions",
-    "model": "kimi-k2-0711-preview",
+    "url": KIMI_API_URL,
+    "model": _get_model("kimi"),
     "env_key": "KIMI_API_KEY",
     "temperature": 0.7,
     "max_tokens": 2048,
@@ -113,15 +114,15 @@ def _stop_server(proc):
         return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, OSError):
-        pass
+    except (ProcessLookupError, OSError) as exc:
+        print(f"  SIGTERM server cleanup: {exc}", file=sys.stderr)
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
+        except (ProcessLookupError, OSError) as exc:
+            print(f"  SIGKILL server cleanup: {exc}", file=sys.stderr)
 
 
 def _wait_for_server(port, timeout=SERVER_WAIT):
@@ -263,8 +264,8 @@ def run_hardening(prd_path, spec_patterns):
         for spec_file in sorted(glob_mod.glob(pattern)):
             try:
                 specs_content += Path(spec_file).read_text(encoding="utf-8") + "\n"
-            except OSError:
-                pass
+            except OSError as exc:
+                print(f"  could not read spec {spec_file}: {exc}", file=sys.stderr)
 
     # Check API key
     load_dotenv()

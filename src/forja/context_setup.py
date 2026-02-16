@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import select
 import shutil
+import sys
 from pathlib import Path
 
 from forja.utils import (
@@ -20,6 +22,29 @@ from forja.utils import (
     load_dotenv,
     parse_json,
 )
+
+# ── Stdin flush ─────────────────────────────────────────────────────
+
+
+def _flush_stdin() -> None:
+    """Discard any buffered input in stdin.
+
+    During LLM calls the terminal appears frozen; users press Enter to
+    "wake it up" and those newlines sit in the stdin buffer.  When the
+    next ``input()`` fires it reads a buffered newline and silently
+    accepts the default, skipping the question.
+
+    This helper drains any pending data before the next interactive
+    prompt so every ``input()`` call truly waits for the user.
+    """
+    if not sys.stdin.isatty():
+        return  # piped input — don't discard
+    try:
+        while select.select([sys.stdin], [], [], 0.0)[0]:
+            sys.stdin.readline()
+    except (OSError, ValueError):
+        pass  # stdin already closed or not selectable
+
 
 # ── Path safety ──────────────────────────────────────────────────────
 
@@ -54,6 +79,7 @@ def _is_safe_doc_path(path: Path) -> bool:
 
 def _ask(prompt: str, default: str = "") -> str:
     """Ask the user a question. Returns answer or default."""
+    _flush_stdin()
     try:
         suffix = f" ({default})" if default else ""
         answer = input(f"  {BOLD}{prompt}{suffix}:{RESET} ").strip()
@@ -65,6 +91,7 @@ def _ask(prompt: str, default: str = "") -> str:
 
 def _ask_choice(prompt: str, options: list[tuple[str, str]], default: int = 1) -> tuple[int, str]:
     """Show numbered options, return (index, label). 1-indexed."""
+    _flush_stdin()
     print(f"\n  {BOLD}{prompt}{RESET}")
     for i, (label, _desc) in enumerate(options, 1):
         marker = f"{GREEN}({i}){RESET}" if i == default else f"  ({i})"
@@ -80,6 +107,7 @@ def _ask_choice(prompt: str, options: list[tuple[str, str]], default: int = 1) -
 
 def _ask_multiline(prompt: str) -> list[str]:
     """Get multiple lines until empty line."""
+    _flush_stdin()
     print(f"  {BOLD}{prompt}{RESET}")
     lines: list[str] = []
     while True:
@@ -156,6 +184,7 @@ def _setup_company(target: Path) -> tuple[str | None, str | None]:
             f"Include: what the company does, target market, key differentiators, tech philosophy. "
             f"Max 30 lines markdown.",
             system="You respond only with the requested content. No preamble.",
+            max_retries=0,
         )
         if raw:
             overview = AUTO_HEADER + raw.strip() + "\n"
@@ -215,6 +244,7 @@ def _setup_domain(target: Path, name: str, desc: str) -> str | None:
         f'and supporting data points. Max 30 lines."\n'
         f'}}',
         system="You are a domain expert. Respond only with valid JSON.",
+        max_retries=0,
     )
     if raw:
         data = parse_json(raw)
@@ -366,6 +396,7 @@ def _setup_design_system(target: Path, name: str) -> None:
         f"spacing rules, illustration style recommendations, list of things NOT to do. "
         f"Format as markdown. Max 80 lines.",
         system="You respond only with the requested content. No preamble.",
+        max_retries=0,
     )
     if raw:
         ref_content = AUTO_HEADER + raw.strip() + "\n"

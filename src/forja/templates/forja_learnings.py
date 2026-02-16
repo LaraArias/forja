@@ -67,10 +67,10 @@ def _read_all_entries():
                     continue
                 try:
                     entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-        except OSError:
-            pass
+                except json.JSONDecodeError as exc:
+                    print(f"  malformed JSONL in {fpath}: {exc}", file=sys.stderr)
+        except OSError as exc:
+            print(f"  could not read {fpath}: {exc}", file=sys.stderr)
     return entries
 
 
@@ -295,8 +295,8 @@ def cmd_extract():
                 )
                 _try_append("spec-gap", learning, "spec-enrichment.json", "high",
                             existing, counts)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read spec-enrichment.json: {exc}", file=sys.stderr)
 
     # ── 2. plan-transcript.json → answers tagged ASSUMPTION → "assumption" ──
     transcript_path = Path(".forja") / "plan-transcript.json"
@@ -322,8 +322,8 @@ def cmd_extract():
                     )
                     _try_append("assumption", learning, "plan-transcript.json", "medium",
                                 existing, counts)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read plan-transcript.json: {exc}", file=sys.stderr)
 
     # ── 3. features.json → features with cycles > 2 → "error-pattern" ──
     for fpath in sorted(glob_mod.glob("context/teammates/*/features.json")):
@@ -341,8 +341,8 @@ def cmd_extract():
                     _try_append("error-pattern", learning,
                                 f"features.json/{teammate}", "medium",
                                 existing, counts)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read {fpath}: {exc}", file=sys.stderr)
 
     # ── 4. outcome-report.json → unmet + deferred requirements ──
     outcome_path = Path(".forja") / "outcome-report.json"
@@ -397,8 +397,8 @@ def cmd_extract():
                 _try_append("product-backlog", learning,
                             "outcome-report.json", "low",
                             existing, counts)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read outcome-report.json: {exc}", file=sys.stderr)
 
     # ── 5. crossmodel/*.json → HIGH severity issues → "kimi-finding" ──
     for fpath in sorted(glob_mod.glob(".forja/crossmodel/*.json")):
@@ -423,8 +423,8 @@ def cmd_extract():
                 _try_append("kimi-finding", learning,
                             f"crossmodel/{fname}", "high",
                             existing, counts)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read crossmodel/{fname}: {exc}", file=sys.stderr)
 
     # ── Summary ──
     total = sum(counts.values())

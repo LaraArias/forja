@@ -23,7 +23,7 @@ from forja.utils import (
     load_dotenv,
     safe_read_json,
 )
-from forja.context_setup import interactive_context_setup
+from forja.context_setup import interactive_context_setup, _flush_stdin
 
 TEMPLATES = [
     # (source in templates/, target relative to project root)
@@ -129,6 +129,7 @@ def _prompt_overwrite(found: list[str]) -> bool:
     print(f"  {WARN_ICON} Existing Forja project detected:")
     for f in found:
         print(f"      - {f}")
+    _flush_stdin()
     try:
         answer = input("\n  Overwrite existing files? [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -278,6 +279,7 @@ def _ask_skill() -> str | None:
     for i, (label, _desc) in enumerate(options, 1):
         marker = f"{GREEN}({i}){RESET}" if i == 1 else f"  ({i})"
         print(f"    {marker} {label}")
+    _flush_stdin()
     try:
         raw = input(f"  {BOLD}>{RESET} ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -310,7 +312,7 @@ def _copy_skill(target: Path, skill_name: str) -> None:
         (dest_dir / "workflow.json").write_text(content, encoding="utf-8")
         print(f"  {PASS_ICON} Workflow pipeline configured")
     except (OSError, TypeError):
-        pass  # workflow.json is optional
+        pass  # workflow.json is optional for skills without pipelines
 
 
 # ── Main entry point ─────────────────────────────────────────────────
@@ -369,6 +371,9 @@ def run_init(directory: str = ".", force: bool = False, upgrade: bool = False) -
     # Step 4: Initialize git
     print("\n── Git ──")
     _init_git(target)
+
+    # Load .env so context_setup LLM calls can find API keys
+    load_dotenv()
 
     # Step 5: Skill selection + context setup
     skill_name = _ask_skill()

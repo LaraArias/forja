@@ -13,13 +13,17 @@ from __future__ import annotations
 
 import glob as glob_mod
 import json
+import logging
 import os
 import time
 from pathlib import Path
 
+logger = logging.getLogger("forja")
+
 from forja.constants import (
     CONTEXT_DIR, FORJA_DIR, LEARNINGS_DIR, PRD_PATH, STORE_DIR,
 )
+from forja.context_setup import _flush_stdin
 from forja.utils import (
     BOLD,
     CYAN,
@@ -137,8 +141,8 @@ def _detect_skill() -> str:
                     return "landing-page"
                 if "database" in agent_names or "security" in agent_names:
                     return "api-backend"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to read skill file %s: %s", path, exc)
     return "custom"
 
 
@@ -303,6 +307,7 @@ def _scratch_flow(existing_context: str | None = None):
     while True:
         if idea is None:
             print(f"  {BOLD}Describe your project idea (2-3 sentences):{RESET}")
+            _flush_stdin()
             try:
                 idea = input(f"  {BOLD}>{RESET} ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -338,6 +343,7 @@ def _scratch_flow(existing_context: str | None = None):
         print(f"    {CYAN}(3){RESET} Save and exit")
         print()
 
+        _flush_stdin()
         try:
             choice = input(f"  {BOLD}>{RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -399,10 +405,10 @@ def _gather_context() -> str:
                             break
                         parts.append(f"[learning] {text}")
                         total_chars += len(text)
-                except json.JSONDecodeError:
-                    pass
-        except OSError:
-            pass
+                except json.JSONDecodeError as exc:
+                    logger.debug("Malformed JSONL line in %s: %s", fpath, exc)
+        except OSError as exc:
+            logger.debug("Could not read learnings file %s: %s", fpath, exc)
 
     # Business context: company, domains, design-system (shared utility)
     biz = gather_context(CONTEXT_DIR, max_chars=3000)
@@ -602,6 +608,7 @@ def _ask_question(q, experts, prd_summary, research_log=None, total=8):
     print()
 
     while True:
+        _flush_stdin()
         try:
             answer = input(f"  {BOLD}>{RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -713,6 +720,7 @@ def _collect_design_context() -> str:
 
     print(f"\n{BOLD}── Design Context (optional, Enter to skip) ──{RESET}\n")
 
+    _flush_stdin()
     try:
         ref = input("  Reference URL or screenshot path (Enter to skip): ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -723,6 +731,7 @@ def _collect_design_context() -> str:
             f"# Visual References\n\n- {ref}\n", encoding="utf-8",
         )
 
+    _flush_stdin()
     try:
         colors = input("  Brand colors - primary, secondary, accent (Enter for auto): ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -743,6 +752,7 @@ def _collect_design_context() -> str:
             encoding="utf-8",
         )
 
+    _flush_stdin()
     try:
         style = input("  Style preference - minimal/playful/corporate/brutal (Enter for minimal): ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -900,6 +910,7 @@ def _interactive_prd_edit(prd_text: str) -> str:
         print(f"    {DIM}(4){RESET} View full PRD")
         print()
 
+        _flush_stdin()
         try:
             choice = input(f"  {BOLD}>{RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -909,6 +920,7 @@ def _interactive_prd_edit(prd_text: str) -> str:
         if choice == "1":
             return prd_text
         elif choice == "2":
+            _flush_stdin()
             try:
                 feedback = input(f"  {BOLD}What would you change?{RESET} > ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -924,6 +936,7 @@ def _interactive_prd_edit(prd_text: str) -> str:
                 for line in preview.splitlines():
                     print(f"  {line}")
         elif choice == "3":
+            _flush_stdin()
             try:
                 feedback = input(
                     f"  {BOLD}Describe what you want differently{RESET} > "

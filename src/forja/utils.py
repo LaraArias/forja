@@ -535,8 +535,8 @@ def gather_context(context_dir: Path, max_chars: int = 3000) -> str:
                     break
                 parts.append(entry)
                 total_chars += len(entry)
-            except (OSError, UnicodeDecodeError):
-                pass
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.debug("Could not read context file %s: %s", fpath, exc)
 
     return "\n".join(parts)
 

@@ -101,10 +101,12 @@ def _check_anthropic_api_key():
     if not HAS_URLLIB:
         return True  # Can't check, assume OK
 
-    # Use the messages endpoint with a minimal request to validate the key
+    # Use the messages endpoint with a minimal request to validate the key.
+    # Model name from env var override or default.
+    model = os.environ.get("FORJA_MODELS_ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
     url = "https://api.anthropic.com/v1/messages"
     body = json.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": model,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "hi"}],
     }).encode("utf-8")

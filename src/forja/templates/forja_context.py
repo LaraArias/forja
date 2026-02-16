@@ -366,8 +366,8 @@ def cmd_history(args):
     if hist_file.exists():
         try:
             history = json.loads(hist_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read history for {key}: {exc}", file=sys.stderr)
 
     # Also include current version
     current = _load_var(key)

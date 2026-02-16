@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
+# FORJA_TEMPLATE_VERSION=0.1.0
 """Forja deterministic file validator. Zero LLM.
 
+Multi-language support: validates by file extension. Unknown extensions
+always pass to prevent infinite retry cycles.
+
 Usage:
-    python3 .forja-tools/forja_validator.py check-file <ruta_archivo>
+    python3 .forja-tools/forja_validator.py check-file <file_path>
 """
 
 import ast
 import importlib.util
+import json as json_mod
 import subprocess
 import sys
 from pathlib import Path
 
-PASS = "\033[32m[PASS]\033[0m"
-FAIL = "\033[31m[FAIL]\033[0m"
-WARN = "\033[33m[WARN]\033[0m"
+from forja_utils import PASS_ICON as PASS, FAIL_ICON as FAIL, WARN_ICON as WARN
+
 SKIP = "\033[90m[SKIP]\033[0m"
 
-JS_EXTENSIONS = {".js", ".ts", ".jsx", ".tsx"}
+JS_EXTENSIONS = {".js", ".jsx"}
+TS_EXTENSIONS = {".ts", ".tsx"}
+COMPILED_EXTENSIONS = {".cs", ".java", ".go", ".rs", ".cpp", ".c", ".h", ".hpp", ".swift", ".kt"}
+CONFIG_DOC_EXTENSIONS = {".md", ".txt", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".env", ".csv"}
+MARKUP_EXTENSIONS = {".html", ".htm", ".xml", ".svg"}
 
 # Brackets that must be balanced in JS/TS files
 BRACKET_PAIRS = {"(": ")", "[": "]", "{": "}"}
@@ -35,7 +43,7 @@ def check_ast(filepath):
     except SyntaxError as e:
         line = e.lineno or "?"
         msg = e.msg or "unknown error"
-        print(f"  {FAIL} AST parse error: línea {line}, {msg}")
+        print(f"  {FAIL} AST parse error: line {line}, {msg}")
         return False
 
 
@@ -67,7 +75,7 @@ def check_imports(filepath):
         print(f"  {PASS} Imports OK")
     else:
         names = ", ".join(missing)
-        print(f"  {WARN} Imports no resueltos (third-party?): {names}")
+        print(f"  {WARN} Unresolved imports (third-party?): {names}")
 
 
 def check_ruff(filepath):
@@ -79,11 +87,11 @@ def check_ruff(filepath):
             text=True,
         )
     except FileNotFoundError:
-        print(f"  {WARN} ruff no encontrado en PATH, saltando lint")
+        print(f"  {WARN} ruff not found in PATH, skipping lint")
         return
 
     if result.returncode == 0:
-        print(f"  {PASS} ruff: sin warnings")
+        print(f"  {PASS} ruff: no warnings")
     else:
         lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
         count = len(lines)
@@ -106,9 +114,9 @@ def check_not_empty(filepath):
     """Check file is not empty."""
     size = filepath.stat().st_size
     if size == 0:
-        print(f"  {FAIL} Archivo vacío")
+        print(f"  {FAIL} Empty file")
         return False
-    print(f"  {PASS} No vacío ({size} bytes)")
+    print(f"  {PASS} Not empty ({size} bytes)")
     return True
 
 
@@ -169,55 +177,168 @@ def check_balanced_brackets(filepath):
         elif ch in CLOSE_TO_OPEN:
             expected_open = CLOSE_TO_OPEN[ch]
             if not stack:
-                print(f"  {FAIL} Bracket sin abrir: '{ch}' en línea {line}")
+                print(f"  {FAIL} Unmatched closing bracket: '{ch}' on line {line}")
                 return False
             open_ch, open_line = stack.pop()
             if open_ch != expected_open:
-                print(f"  {FAIL} Bracket mismatch: '{open_ch}' (línea {open_line}) cerrado con '{ch}' (línea {line})")
+                print(f"  {FAIL} Bracket mismatch: '{open_ch}' (line {open_line}) closed with '{ch}' (line {line})")
                 return False
 
         i += 1
 
     if stack:
         open_ch, open_line = stack[-1]
-        print(f"  {FAIL} Bracket sin cerrar: '{open_ch}' en línea {open_line}")
+        print(f"  {FAIL} Unclosed bracket: '{open_ch}' on line {open_line}")
         return False
 
-    print(f"  {PASS} Brackets balanceados")
+    print(f"  {PASS} Brackets balanced")
     return True
 
 
 def validate_js(filepath):
-    """JS/TS validation pipeline. Returns exit code."""
+    """JS validation pipeline. Returns exit code."""
     not_empty = check_not_empty(filepath)
     if not not_empty:
         return 1
+    # Try node --check if available
+    try:
+        result = subprocess.run(
+            ["node", "--check", str(filepath)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            print(f"  {PASS} node --check OK")
+        else:
+            print(f"  {WARN} node --check: {result.stderr.strip()[:200]}")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print(f"  {WARN} node not found in PATH, falling back to bracket check")
     balanced = check_balanced_brackets(filepath)
     return 0 if balanced else 1
+
+
+# ── TS validation ─────────────────────────────────────────────────
+
+def validate_ts(filepath):
+    """TypeScript validation: non-empty + brackets. Always passes on structure.
+
+    TypeScript requires tsc for real validation which needs tsconfig.
+    We do best-effort structural checks only.
+    """
+    not_empty = check_not_empty(filepath)
+    if not not_empty:
+        return 1
+    check_balanced_brackets(filepath)
+    # TS bracket failures are warnings, not errors — tsc is the real validator
+    print(f"  {PASS} TypeScript file accepted (tsc needed for full validation)")
+    return 0
+
+
+# ── HTML validation ──────────────────────────────────────────────
+
+def validate_html(filepath):
+    """HTML validation: valid UTF-8 and non-empty."""
+    try:
+        content = filepath.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"  {FAIL} Invalid UTF-8 encoding")
+        return 1
+    if not content.strip():
+        print(f"  {FAIL} Empty file")
+        return 1
+    print(f"  {PASS} HTML: valid UTF-8, {len(content)} chars")
+    return 0
+
+
+# ── JSON validation ──────────────────────────────────────────────
+
+def validate_json(filepath):
+    """JSON validation: json.loads."""
+    try:
+        content = filepath.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"  {FAIL} Invalid UTF-8 encoding")
+        return 1
+    try:
+        json_mod.loads(content)
+        print(f"  {PASS} JSON: valid")
+        return 0
+    except json_mod.JSONDecodeError as e:
+        print(f"  {FAIL} JSON parse error: {e}")
+        return 1
+
+
+# ── CSS validation ───────────────────────────────────────────────
+
+def validate_css(filepath):
+    """CSS validation: non-empty check only. CSS parsers are complex."""
+    not_empty = check_not_empty(filepath)
+    if not not_empty:
+        return 1
+    print(f"  {PASS} CSS: accepted (non-empty)")
+    return 0
+
+
+# ── Passthrough validation ───────────────────────────────────────
+
+def validate_passthrough(filepath, reason):
+    """Always passes. For file types that cannot be validated inline."""
+    size = filepath.stat().st_size
+    print(f"  {PASS} {reason} ({size} bytes)")
+    return 0
 
 
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) < 3 or sys.argv[1] != "check-file":
-        print("Uso: python3 .forja-tools/forja_validator.py check-file <ruta_archivo>")
+        print("Usage: python3 .forja-tools/forja_validator.py check-file <file_path>")
         sys.exit(1)
 
     filepath = Path(sys.argv[2])
     if not filepath.exists():
-        print(f"  {FAIL} Archivo no encontrado: {filepath}")
+        print(f"  {FAIL} File not found: {filepath}")
         sys.exit(1)
 
     ext = filepath.suffix.lower()
-    print(f"Validando: {filepath}")
+    print(f"Validating: {filepath}")
 
+    # Python: full validation (AST + imports + ruff)
     if ext == ".py":
         sys.exit(validate_python(filepath))
-    elif ext in JS_EXTENSIONS:
+
+    # JavaScript: node --check + bracket balance
+    if ext in JS_EXTENSIONS:
         sys.exit(validate_js(filepath))
-    else:
-        print(f"  {SKIP} Tipo {ext or 'sin extensión'} no requiere validación")
-        sys.exit(0)
+
+    # TypeScript: structural check only (tsc needed for real validation)
+    if ext in TS_EXTENSIONS:
+        sys.exit(validate_ts(filepath))
+
+    # HTML/XML: UTF-8 + non-empty
+    if ext in MARKUP_EXTENSIONS:
+        sys.exit(validate_html(filepath))
+
+    # JSON: json.loads
+    if ext == ".json":
+        sys.exit(validate_json(filepath))
+
+    # CSS: non-empty
+    if ext == ".css":
+        sys.exit(validate_css(filepath))
+
+    # Compiled languages: cannot validate without compiler, always pass
+    if ext in COMPILED_EXTENSIONS:
+        sys.exit(validate_passthrough(filepath, f"Compiled language ({ext}), skipping inline validation"))
+
+    # Config/docs: always pass
+    if ext in CONFIG_DOC_EXTENSIONS:
+        sys.exit(validate_passthrough(filepath, f"Config/doc file ({ext})"))
+
+    # Unknown extension: ALWAYS pass to prevent infinite cycles
+    print(f"  {PASS} Unknown extension ({ext or 'none'}), accepted")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

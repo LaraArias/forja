@@ -111,8 +111,8 @@ def _read_context_store():
             value = data.get("value", "")
             if key and value:
                 items.append(f"{key}: {value}")
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read {fpath}: {exc}", file=sys.stderr)
     return items
 
 
@@ -134,10 +134,10 @@ def _read_learnings():
                             return items
                         items.append(text)
                         total_chars += len(text)
-                except json.JSONDecodeError:
-                    pass
-        except OSError:
-            pass
+                except json.JSONDecodeError as exc:
+                    print(f"  malformed JSONL in {fpath}: {exc}", file=sys.stderr)
+        except OSError as exc:
+            print(f"  could not read {fpath}: {exc}", file=sys.stderr)
     return items
 
 

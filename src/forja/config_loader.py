@@ -9,9 +9,12 @@ e.g. FORJA_BUILD_TIMEOUT_STALL_MINUTES=15.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger("forja")
 
 # ── Defaults (match forja.toml.default) ──────────────────────────────
 
@@ -103,7 +106,7 @@ def _parse_value(raw: str) -> str | int | bool:
     try:
         return int(stripped)
     except ValueError:
-        pass
+        logger.debug("Could not parse %r as integer, treating as string", stripped)
 
     return stripped
 
@@ -154,7 +157,7 @@ def _apply_env_overrides(merged: dict) -> None:
                     try:
                         section_dict[key] = int(env_val)
                     except ValueError:
-                        pass  # keep file/default value
+                        logger.warning("Cannot coerce env %s=%r to int, keeping default", env_name, env_val)
                 else:
                     section_dict[key] = env_val
 

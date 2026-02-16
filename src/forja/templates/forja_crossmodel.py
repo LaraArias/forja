@@ -20,6 +20,7 @@ from pathlib import Path
 from forja_utils import (
     load_dotenv, call_provider, extract_content, parse_json,
     PASS_ICON, FAIL_ICON, WARN_ICON, VERSION,
+    KIMI_API_URL, _get_model,
 )
 
 PASS = PASS_ICON
@@ -36,8 +37,8 @@ REVIEW_PROMPT = (
 PROVIDERS = [
     {
         "name": "Kimi (Moonshot AI)",
-        "url": "https://api.moonshot.ai/v1/chat/completions",
-        "model": "kimi-k2-0711-preview",
+        "url": KIMI_API_URL,
+        "model": _get_model("kimi"),
         "env_key": "KIMI_API_KEY",
         "temperature": 0.6,
         "max_tokens": 1024,

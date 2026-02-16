@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob as glob_mod
 import json
+import logging
 import os
 import re
 import signal
@@ -17,6 +18,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+logger = logging.getLogger("forja")
 
 from forja.config_loader import load_config
 from forja.constants import (
@@ -31,7 +34,7 @@ from forja.utils import (
 # ── Placeholder detection ────────────────────────────────────────────
 
 _PLACEHOLDER_MARKERS = (
-    "Describe tu proyecto",
+    "Describe tu proyecto",  # Legacy marker from older init templates
     "Describe your project here",
     "Describe your project",
 )
@@ -170,8 +173,8 @@ def _extract_severity_counts(stdout):
                 if low:
                     parts.append(f"{low} low")
                 return ", ".join(parts)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.debug("Failed to parse severity counts: %s", exc)
     return ""
 
 
@@ -279,8 +282,8 @@ def _inject_context_into_claude_md():
             if index_text:
                 context_parts.append("### Context Index\n")
                 context_parts.append(index_text)
-        except (OSError, UnicodeDecodeError):
-            pass
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.debug("Could not read context index: %s", exc)
 
     # Context store decisions
     store_items = []
@@ -391,14 +394,14 @@ def _stop_observatory_live(proc):
     except (subprocess.TimeoutExpired, OSError):
         try:
             proc.kill()
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("Could not kill observatory process: %s", exc)
     # Also clean PID file
     pid_file = FORJA_DIR / "observatory-live.pid"
     try:
         pid_file.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("Could not remove observatory PID file: %s", exc)
 
 
 # ── Phase 2: Build (Claude Code) ────────────────────────────────────
@@ -510,8 +513,8 @@ def _monitor_progress(stop_event, start_time, timeout_event=None):
                                      "--dir", tm_dir],
                                     capture_output=True, timeout=10,
                                 )
-                            except (subprocess.TimeoutExpired, OSError):
-                                pass
+                            except (subprocess.TimeoutExpired, OSError) as exc:
+                                logger.debug("Auto-block for %s failed: %s", feat.id, exc)
                         elif stale_secs >= 300 and key not in feature_stall_warned:
                             feature_stall_warned.add(key)
                             sys.stdout.write(
@@ -653,8 +656,8 @@ def _run_project_tests(project_dir: Path) -> dict:
                 )
                 results["exit_code"] = r.returncode
                 results["output"] = r.stdout + r.stderr
-        except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
-            pass
+        except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired) as exc:
+            logger.debug("npm test setup failed: %s", exc)
 
     # Save results
     results_path = project_dir / ".forja" / "test-results.json"
@@ -708,8 +711,8 @@ def _run_outcome(prd_path):
                     f"{color}{coverage}% coverage{RESET} ({met} met, {unmet} unmet)",
                 )
                 return
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.debug("Failed to parse outcome coverage: %s", exc)
 
     # Fallback: just show exit code
     if result.returncode == 0:
@@ -845,8 +848,8 @@ def _release_pid_lock():
     pid_file = FORJA_DIR / "runner.pid"
     try:
         pid_file.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("Could not remove runner PID file: %s", exc)
 
 
 def run_forja(prd_path: str | None = None) -> bool:
@@ -1021,8 +1024,8 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                         proc.wait(timeout=5)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        logger.debug("SIGKILL failed for build process: %s", exc)
                 break
             time.sleep(1)
 

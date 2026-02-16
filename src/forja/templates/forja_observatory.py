@@ -78,15 +78,15 @@ def _read_crossmodel():
                 for issue in file_issues:
                     issue.setdefault("file", fpath.stem)
                     issues.append(issue)
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"  could not read {fpath}: {exc}", file=sys.stderr)
     single = Path(".forja") / "crossmodel-report.json"
     if single.exists() and not issues:
         try:
             data = json.loads(single.read_text(encoding="utf-8"))
             issues = data.get("issues", data.get("findings", []))
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read crossmodel-report.json: {exc}", file=sys.stderr)
     return issues
 
 
@@ -126,10 +126,10 @@ def _read_learnings():
                     entry = json.loads(line)
                     entry.setdefault("category", category)
                     entries.append(entry)
-                except json.JSONDecodeError:
-                    pass
-        except OSError:
-            pass
+                except json.JSONDecodeError as exc:
+                    print(f"  malformed JSONL in {fpath}: {exc}", file=sys.stderr)
+        except OSError as exc:
+            print(f"  could not read {fpath}: {exc}", file=sys.stderr)
     return entries
 
 
@@ -146,10 +146,10 @@ def _read_feature_events():
                 continue
             try:
                 events.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    except OSError:
-        pass
+            except json.JSONDecodeError as exc:
+                print(f"  malformed JSONL in feature-events.jsonl: {exc}", file=sys.stderr)
+    except OSError as exc:
+        print(f"  could not read feature-events.jsonl: {exc}", file=sys.stderr)
     return events
 
 
@@ -199,8 +199,8 @@ def _read_src_stats():
             line_count = len(fpath.read_text(encoding="utf-8", errors="replace").splitlines())
             stats[ext]["lines"] += line_count
             total_lines += line_count
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"  could not count lines in {fpath}: {exc}", file=sys.stderr)
     return stats, total_files, total_lines
 
 
@@ -463,8 +463,8 @@ def _load_all_runs():
     for fpath in sorted(glob_mod.glob(str(OBSERVATORY_DIR / "run-*.json"))):
         try:
             runs.append(json.loads(Path(fpath).read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not load run file {fpath}: {exc}", file=sys.stderr)
     return runs
 
 
@@ -640,8 +640,8 @@ def cmd_report():
             subprocess.run(["open", str(html_path)], timeout=5)
         elif platform.system() == "Linux":
             subprocess.run(["xdg-open", str(html_path)], timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        print(f"  could not open browser: {exc}", file=sys.stderr)
 
     return True
 
@@ -709,8 +709,8 @@ def cmd_live():
                         subprocess.run(["open", str(html_path)], timeout=5)
                     elif platform.system() == "Linux":
                         subprocess.run(["xdg-open", str(html_path)], timeout=5)
-                except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                    pass
+                except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                    print(f"  could not open browser: {exc}", file=sys.stderr)
 
             # Check if build is done (all features resolved: passed or blocked)
             total_f = metrics["total_features"]
@@ -772,8 +772,8 @@ def cmd_live():
     # Clean up PID file
     try:
         pid_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"  could not remove PID file: {exc}", file=sys.stderr)
 
     return True
 

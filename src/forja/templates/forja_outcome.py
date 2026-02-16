@@ -77,8 +77,8 @@ def _read_features():
                 desc = feat.display_name
                 status = "PASSED" if feat.status == "passed" else f"FAILED (cycles={feat.cycles})"
                 lines.append(f"  [{teammate}] {desc}: {status}")
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read {fpath}: {exc}", file=sys.stderr)
     return "\n".join(lines) if lines else ""
 
 
@@ -96,8 +96,8 @@ def _read_validation_specs():
                 desc = ep.get("description", "")
                 desc_part = f" - {desc}" if desc else ""
                 lines.append(f"  [{teammate}] {method} {path}{desc_part}")
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  could not read {fpath}: {exc}", file=sys.stderr)
     return "\n".join(lines) if lines else ""
 
 
