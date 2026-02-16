@@ -543,7 +543,7 @@ class TestSkillPrdConstraints:
         assert SKILL_PRD_CONSTRAINTS["custom"] == ""
 
     def test_landing_page_prd_with_valid_llm_response(self):
-        """Full round-trip: skill constraint → LLM → structured PRD."""
+        """Full round-trip: skill constraint → LLM → structured PRD (old format compat)."""
         from forja.planner import _generate_prd_from_idea
         mock_response = json.dumps({
             "title": "Forja Landing Page",
@@ -562,6 +562,74 @@ class TestSkillPrdConstraints:
         # Verify constraint was in the prompt
         prompt_sent = mock_llm.call_args[0][0]
         assert "SINGLE index.html" in prompt_sent
+
+    def test_prd_with_new_schema_features(self):
+        """New schema: features with name, description, done_when."""
+        from forja.planner import _generate_prd_from_idea
+        mock_response = json.dumps({
+            "title": "Notes API",
+            "problem": "Developers need a simple notes storage",
+            "audience": "Individual developers building side projects",
+            "features": [
+                {"name": "Create Note", "description": "POST /notes creates a note", "done_when": "Returns 201 with note ID"},
+                {"name": "List Notes", "description": "GET /notes returns all notes", "done_when": "Returns paginated JSON array"},
+            ],
+            "stack": {"language": "Python", "framework": "FastAPI", "database": "SQLite", "extras": ["pydantic"], "rationale": "Pip-installable, async-native"},
+            "out_of_scope": ["Auth", "Deployment"],
+            "success_metric": "User creates and retrieves a note in under 2 seconds",
+        })
+        with patch("forja.planner.call_llm", return_value=mock_response):
+            prd, title = _generate_prd_from_idea("Notes API", skill="api-backend")
+        assert title == "Notes API"
+        assert "**Create Note**" in prd
+        assert "Done when: Returns 201" in prd
+        assert "## Audience" in prd
+        assert "Individual developers" in prd
+        assert "## Success Metric" in prd
+        assert "under 2 seconds" in prd
+        assert "Rationale: Pip-installable" in prd
+
+    def test_prd_prompt_includes_context(self):
+        """Business context appears in LLM prompt with labelled sections."""
+        from forja.planner import _generate_prd_from_idea
+        ctx = (
+            "## COMPANY OVERVIEW\nForja builds software faster.\n\n"
+            "## VALUE PROPOSITIONS\nStop building the wrong thing"
+        )
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("Landing page", context=ctx)
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "BUSINESS CONTEXT" in prompt_sent
+        assert "PRIMARY INPUT" in prompt_sent
+        assert "Forja" in prompt_sent
+        assert "Stop building the wrong thing" in prompt_sent
+
+    def test_prd_prompt_no_context_when_empty(self):
+        """No context section when context is empty."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("A todo app", context="")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "BUSINESS CONTEXT" not in prompt_sent
+
+    def test_prd_system_msg_has_skill_constraint(self):
+        """System message includes CRITICAL CONSTRAINT for landing-page."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("A page", skill="landing-page")
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "CRITICAL CONSTRAINT" in system_sent
+        assert "SINGLE index.html" in system_sent
+        assert "valid JSON" in system_sent
+
+    def test_prd_system_msg_no_constraint_for_custom(self):
+        """System message has no constraint for custom skill."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("An app")
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "CRITICAL CONSTRAINT" not in system_sent
+        assert "valid JSON" in system_sent
 
 
 class TestScratchFlowSkill:
@@ -605,6 +673,130 @@ class TestScratchFlowSkill:
         mock_gen.assert_called_once()
         _, kwargs = mock_gen.call_args
         assert kwargs.get("skill") == "custom"
+
+    def test_scratch_flow_passes_context_when_available(self):
+        """existing_context dict: idea is short summary, context is labelled."""
+        from forja.planner import _scratch_flow
+        mock_prd = "# Forja\n## Problem\nNeed a landing page"
+        biz_ctx = {
+            "company_overview": "# Forja\nForja builds software faster.",
+            "audience": "## Developers\nBuilding APIs",
+            "value_props": "## Main\nShip faster",
+            "objections": "## Price\nToo expensive",
+        }
+        with patch("forja.planner._generate_prd_from_idea",
+                   return_value=(mock_prd, "Forja")) as mock_gen, \
+             patch("forja.planner._interactive_prd_edit",
+                   return_value=mock_prd), \
+             patch("builtins.input", return_value="1"), \
+             patch("forja.planner.PRD_PATH") as mock_prd_path:
+            mock_prd_path.exists.return_value = False
+            mock_prd_path.__str__ = lambda s: "context/prd.md"
+            mock_prd_path.write_text = MagicMock()
+            _scratch_flow(existing_context=biz_ctx, skill="landing-page")
+        mock_gen.assert_called_once()
+        args, kwargs = mock_gen.call_args
+        idea = args[0]
+        ctx = kwargs.get("context", "")
+        # idea should be a SHORT summary, NOT the full context
+        assert len(idea) < 200
+        assert "Forja" in idea
+        # context should be the formatted, labelled string
+        assert "COMPANY OVERVIEW" in ctx
+        assert "TARGET AUDIENCE" in ctx
+        assert "VALUE PROPOSITIONS" in ctx
+        assert "OBJECTION HANDLING" in ctx
+        # No duplication: idea != context
+        assert idea != ctx
+        assert kwargs.get("skill") == "landing-page"
+
+    def test_scratch_flow_no_context_when_user_types_idea(self):
+        """When no existing_context, context kwarg is empty."""
+        from forja.planner import _scratch_flow
+        mock_prd = "# App\n## Problem\nNeed an app"
+        inputs = iter(["My custom app idea", "1"])
+        with patch("builtins.input", side_effect=inputs), \
+             patch("forja.planner._generate_prd_from_idea",
+                   return_value=(mock_prd, "App")) as mock_gen, \
+             patch("forja.planner._interactive_prd_edit",
+                   return_value=mock_prd), \
+             patch("forja.planner.PRD_PATH") as mock_prd_path:
+            mock_prd_path.exists.return_value = False
+            mock_prd_path.__str__ = lambda s: "context/prd.md"
+            mock_prd_path.write_text = MagicMock()
+            _scratch_flow()
+        mock_gen.assert_called_once()
+        _, kwargs = mock_gen.call_args
+        assert kwargs.get("context") == ""
+
+
+class TestEnrichedPrdSkill:
+    """Verify _generate_enriched_prd uses skill-appropriate sections."""
+
+    def test_landing_page_sections(self):
+        """skill='landing-page' → 'Page Content Decisions', not 'Technical Decisions'."""
+        from forja.planner import _generate_enriched_prd
+        transcript = [{"tag": "FACT", "expert": "Copywriter", "question": "What's the headline?", "answer": "Build Faster"}]
+        experts = [{"name": "Copywriter", "field": "Copy"}]
+        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+            _generate_enriched_prd("# PRD", transcript, experts, skill="landing-page")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "Page Content Decisions" in prompt_sent
+        assert "Audience & Conversion Strategy" in prompt_sent
+        assert "Accessibility & Performance" in prompt_sent
+        assert "Technical Decisions" not in prompt_sent
+        assert "Security and Edge Cases" not in prompt_sent
+        # Skill constraint in system message
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "CRITICAL CONSTRAINT" in system_sent
+        assert "SINGLE index.html" in system_sent
+
+    def test_api_backend_sections(self):
+        """skill='api-backend' → keeps 'Technical Decisions' and 'Security'."""
+        from forja.planner import _generate_enriched_prd
+        transcript = [{"tag": "DECISION", "expert": "Architect", "question": "Stack?", "answer": "FastAPI"}]
+        experts = [{"name": "Architect", "field": "Backend"}]
+        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+            _generate_enriched_prd("# PRD", transcript, experts, skill="api-backend")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "Technical Decisions" in prompt_sent
+        assert "Security and Edge Cases" in prompt_sent
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "FastAPI" in system_sent
+
+    def test_custom_no_constraint_in_system(self):
+        """skill='custom' → no CRITICAL CONSTRAINT in system message."""
+        from forja.planner import _generate_enriched_prd
+        transcript = [{"tag": "FACT", "expert": "PM", "question": "Users?", "answer": "Devs"}]
+        experts = [{"name": "PM", "field": "Product"}]
+        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+            _generate_enriched_prd("# PRD", transcript, experts, skill="custom")
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "CRITICAL CONSTRAINT" not in system_sent
+
+    def test_default_skill_is_custom(self):
+        """No skill param → default 'custom', standard sections."""
+        from forja.planner import _generate_enriched_prd
+        transcript = [{"tag": "FACT", "expert": "PM", "question": "Q?", "answer": "A"}]
+        experts = [{"name": "PM", "field": "Product"}]
+        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+            _generate_enriched_prd("# PRD", transcript, experts)
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "Technical Decisions" in prompt_sent
+        system_sent = mock_llm.call_args[1].get("system", "")
+        assert "CRITICAL CONSTRAINT" not in system_sent
+
+    def test_research_included_with_skill(self):
+        """Research findings are included even with skill constraint."""
+        from forja.planner import _generate_enriched_prd
+        research = [{"topic": "caching", "findings": "Use Redis or in-memory dict."}]
+        transcript = [{"tag": "FACT", "expert": "Eng", "question": "Q?", "answer": "A"}]
+        experts = [{"name": "Eng", "field": "Engineering"}]
+        with patch("forja.planner.call_llm", return_value="# Enriched") as mock:
+            _generate_enriched_prd("# PRD", transcript, experts, research_log=research, skill="landing-page")
+        prompt = mock.call_args[0][0]
+        assert "Research Findings" in prompt
+        assert "caching" in prompt
 
 
 class TestRunExpertQa:
@@ -803,3 +995,216 @@ class TestPromptContent:
         assert "veto power" in prompt
         assert "build feasibility engineer" in prompt
         assert "pip" in prompt or "npm" in prompt
+
+
+# ── Fix M-R: Structured context → PRD ────────────────────────────────
+
+
+class TestReadExistingContext:
+    """Verify _read_existing_context returns a structured dict."""
+
+    def test_returns_none_when_no_context_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("forja.planner.CONTEXT_DIR", tmp_path / "context")
+        from forja.planner import _read_existing_context
+        assert _read_existing_context() is None
+
+    def test_returns_dict_with_company_overview(self, tmp_path, monkeypatch):
+        ctx = tmp_path / "context"
+        monkeypatch.setattr("forja.planner.CONTEXT_DIR", ctx)
+        company_dir = ctx / "company"
+        company_dir.mkdir(parents=True)
+        (company_dir / "company-overview.md").write_text("# Acme\nWe build things.")
+        from forja.planner import _read_existing_context
+        result = _read_existing_context()
+        assert isinstance(result, dict)
+        assert "company_overview" in result
+        assert "Acme" in result["company_overview"]
+
+    def test_returns_dict_with_all_domain_sections(self, tmp_path, monkeypatch):
+        ctx = tmp_path / "context"
+        monkeypatch.setattr("forja.planner.CONTEXT_DIR", ctx)
+        domain_dir = ctx / "domains" / "developers"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "DOMAIN.md").write_text("## Audience\nDevs building APIs")
+        (domain_dir / "value-props.md").write_text("## Main\nShip faster")
+        (domain_dir / "objections.md").write_text("## Too expensive\nROI within 3 months")
+        from forja.planner import _read_existing_context
+        result = _read_existing_context()
+        assert "audience" in result
+        assert "value_props" in result
+        assert "objections" in result
+        assert "Devs building" in result["audience"]
+        assert "Ship faster" in result["value_props"]
+        assert "ROI" in result["objections"]
+
+    def test_strips_html_comments(self, tmp_path, monkeypatch):
+        ctx = tmp_path / "context"
+        monkeypatch.setattr("forja.planner.CONTEXT_DIR", ctx)
+        company_dir = ctx / "company"
+        company_dir.mkdir(parents=True)
+        (company_dir / "company-overview.md").write_text(
+            "<!-- Auto-generated -->\n# Acme\nContent"
+        )
+        from forja.planner import _read_existing_context
+        result = _read_existing_context()
+        assert "<!--" not in result["company_overview"]
+        assert "Acme" in result["company_overview"]
+
+
+class TestFormatContextForPrompt:
+    """Verify _format_context_for_prompt produces labelled sections."""
+
+    def test_all_sections_labelled(self):
+        from forja.planner import _format_context_for_prompt
+        ctx = {
+            "company_overview": "# Acme Corp",
+            "audience": "## Developers\nBuilding APIs",
+            "value_props": "## Main\nShip faster",
+            "objections": "## Price\nToo expensive",
+        }
+        result = _format_context_for_prompt(ctx)
+        assert "## COMPANY OVERVIEW" in result
+        assert "## TARGET AUDIENCE & DOMAIN" in result
+        assert "## VALUE PROPOSITIONS" in result
+        assert "## OBJECTION HANDLING" in result
+        assert "Acme Corp" in result
+        assert "Ship faster" in result
+
+    def test_partial_context(self):
+        from forja.planner import _format_context_for_prompt
+        ctx = {"company_overview": "# Acme"}
+        result = _format_context_for_prompt(ctx)
+        assert "## COMPANY OVERVIEW" in result
+        assert "TARGET AUDIENCE" not in result
+        assert "VALUE PROPOSITIONS" not in result
+
+
+class TestSummarizeContextForIdea:
+    """Verify _summarize_context_for_idea extracts a short summary."""
+
+    def test_extracts_title_and_first_sentence(self):
+        from forja.planner import _summarize_context_for_idea
+        ctx = {"company_overview": "# Forja\n\nForja helps teams build software faster. More details here."}
+        result = _summarize_context_for_idea(ctx)
+        assert "Forja" in result
+        assert len(result) < 200
+
+    def test_returns_project_when_no_heading(self):
+        from forja.planner import _summarize_context_for_idea
+        ctx = {"audience": "Developers building APIs"}
+        result = _summarize_context_for_idea(ctx)
+        assert result == "Project"
+
+    def test_extracts_from_title_only(self):
+        from forja.planner import _summarize_context_for_idea
+        ctx = {"company_overview": "# My Startup\n## Section\nDetails..."}
+        result = _summarize_context_for_idea(ctx)
+        assert "My Startup" in result
+
+
+class TestPrdNewSchemaFields:
+    """Verify _generate_prd_from_idea renders new business fields."""
+
+    def test_renders_audience_roles_and_value_props(self):
+        """Full round-trip with new schema: audience roles, value props, objections."""
+        from forja.planner import _generate_prd_from_idea
+        mock_response = json.dumps({
+            "title": "Forja Landing",
+            "problem": "Devs waste time building wrong things",
+            "audience": {
+                "primary": "Solo developers",
+                "roles": [
+                    {"role": "CTO", "top_concern": "Build speed"},
+                    {"role": "Developer", "top_concern": "DX quality"},
+                ],
+            },
+            "value_propositions": {
+                "main": "Ship 10x faster",
+                "secondary": [
+                    {"prop": "No config", "proof_point": "Zero setup time"},
+                ],
+            },
+            "key_messages": ["Build, don't configure"],
+            "objection_handling": [
+                {"objection": "Too complex", "response": "One command setup"},
+            ],
+            "competitive_positioning": "Only tool that does X",
+            "features": [{"name": "Hero", "description": "Main section", "done_when": "Visible"}],
+            "stack": {"language": "HTML", "framework": "CSS + JS"},
+            "out_of_scope": ["Backend"],
+            "success_metric": "Page loads in 2s",
+        })
+        with patch("forja.planner.call_llm", return_value=mock_response):
+            prd, title = _generate_prd_from_idea("Forja landing", context="some context")
+        assert "## Value Propositions" in prd
+        assert "Ship 10x faster" in prd
+        assert "No config" in prd
+        assert "## Key Messages" in prd
+        assert "Build, don't configure" in prd
+        assert "## Objection Handling" in prd
+        assert "Too complex" in prd
+        assert "One command setup" in prd
+        assert "## Competitive Positioning" in prd
+        assert "## Audience" in prd
+        assert "| CTO |" in prd
+
+    def test_backward_compat_audience_string(self):
+        """Old format (audience as string) still works without crash."""
+        from forja.planner import _generate_prd_from_idea
+        mock_response = json.dumps({
+            "title": "Old App",
+            "problem": "Problem",
+            "audience": "Individual developers",
+            "features": [{"name": "F1", "description": "D", "done_when": "Done"}],
+            "stack": {"language": "Python", "framework": "FastAPI"},
+            "out_of_scope": [],
+            "success_metric": "Works",
+        })
+        with patch("forja.planner.call_llm", return_value=mock_response):
+            prd, title = _generate_prd_from_idea("Old app")
+        assert "## Audience" in prd
+        assert "Individual developers" in prd
+        # No new sections since they weren't in the response
+        assert "## Value Propositions" not in prd
+        assert "## Objection Handling" not in prd
+
+    def test_no_crash_without_new_fields(self):
+        """When LLM returns minimal JSON (no business fields), no crash."""
+        from forja.planner import _generate_prd_from_idea
+        mock_response = json.dumps({
+            "title": "Simple App",
+            "problem": "Need an app",
+            "features": [{"name": "Core", "description": "Main feature", "done_when": "Works"}],
+            "stack": {"language": "Python", "framework": "Flask"},
+            "out_of_scope": ["Everything else"],
+            "success_metric": "Runs",
+        })
+        with patch("forja.planner.call_llm", return_value=mock_response):
+            prd, title = _generate_prd_from_idea("Simple app")
+        assert prd is not None
+        assert title == "Simple App"
+        assert "## Features" in prd
+
+
+class TestContextInjection:
+    """Verify business context is injected with correct delimiters."""
+
+    def test_delimiters_present_with_context(self):
+        """When context provided, prompt has BUSINESS CONTEXT delimiters."""
+        from forja.planner import _generate_prd_from_idea
+        ctx = "## COMPANY OVERVIEW\nAcme builds rockets"
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("Rocket landing page", context=ctx)
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "--- BUSINESS CONTEXT" in prompt_sent
+        assert "--- END BUSINESS CONTEXT ---" in prompt_sent
+        assert "PRIMARY INPUT" in prompt_sent
+        assert "Acme builds rockets" in prompt_sent
+
+    def test_no_delimiters_without_context(self):
+        """When no context, prompt has no BUSINESS CONTEXT section."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+            _generate_prd_from_idea("A todo app", context="")
+        prompt_sent = mock_llm.call_args[0][0]
+        assert "BUSINESS CONTEXT" not in prompt_sent

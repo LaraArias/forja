@@ -203,85 +203,262 @@ def _call_claude_research(expert_name, expert_field, topic, prd_summary):
 # ── PRD from scratch ───────────────────────────────────────────────
 
 PRD_FROM_IDEA_PROMPT = """\
-You are a senior product manager. A developer has this idea for a software project:
+A developer wants to build a software project. Here is their input:
 
-'{user_idea}'
+--- PROJECT INPUT ---
+{user_idea}
+--- END INPUT ---
 
-Generate a structured PRD draft with:
-1. Title
-2. Problem statement (what pain does this solve, for whom)
-3. Core features (5-8 bullet points, each one sentence)
-4. Suggested stack (based on the requirements)
-5. Out of scope (3-4 things this is NOT)
+{context_section}\
+Generate a structured PRD. For EACH feature, include a one-sentence acceptance criterion \
+(how do you know this feature is done?).
 
 Return JSON:
 {{
-  "title": "string",
-  "problem": "string",
-  "features": ["string"],
-  "stack": {{"language": "string", "framework": "string", "database": "string", "extras": ["string"]}},
-  "out_of_scope": ["string"]
+  "title": "string — name of the project",
+  "problem": "string — who has this problem and what pain it causes",
+  "audience": {{
+    "primary": "string — primary user persona in one sentence",
+    "roles": [
+      {{"role": "string — role name", "top_concern": "string — their #1 concern"}}
+    ]
+  }},
+  "value_propositions": {{
+    "main": "string — the primary value proposition",
+    "secondary": [
+      {{"prop": "string — value proposition", "proof_point": "string — evidence or data"}}
+    ]
+  }},
+  "key_messages": ["string — core message for the target audience"],
+  "objection_handling": [
+    {{"objection": "string — common objection or doubt", "response": "string — how to address it"}}
+  ],
+  "competitive_positioning": "string — how this differs from alternatives",
+  "features": [
+    {{"name": "string", "description": "string", "done_when": "string — acceptance criterion"}}
+  ],
+  "stack": {{
+    "language": "string",
+    "framework": "string",
+    "database": "string or empty",
+    "extras": ["string"],
+    "rationale": "string — why this stack fits"
+  }},
+  "out_of_scope": ["string — things this is NOT"],
+  "success_metric": "string — one measurable outcome that proves this works"
 }}\
 """
 
 
-def _read_existing_context() -> str | None:
-    """Read context files created by context_setup and build a description.
+def _read_existing_context() -> dict[str, str] | None:
+    """Read context files created by context_setup into structured sections.
 
-    Returns a project description string, or None if no context exists.
+    Returns a dict with keys ``company_overview``, ``audience``,
+    ``value_props``, ``objections`` (each a markdown string), or *None*
+    when no context files exist.
     """
-    parts: list[str] = []
+    sections: dict[str, str] = {}
+
+    def _clean(path: Path) -> str:
+        text = path.read_text(encoding="utf-8").strip()
+        lines = [l for l in text.splitlines()
+                 if not l.startswith("<!--") and not l.startswith("-->")]
+        return "\n".join(lines).strip()
 
     # Company overview
     overview_path = CONTEXT_DIR / "company" / "company-overview.md"
     if overview_path.exists():
-        text = overview_path.read_text(encoding="utf-8").strip()
-        # Strip auto-generated header comment
-        lines = [l for l in text.splitlines()
-                 if not l.startswith("<!--") and not l.startswith("-->")]
-        text = "\n".join(lines).strip()
+        text = _clean(overview_path)
         if text:
-            parts.append(text)
+            sections["company_overview"] = text
 
     # Domain files: audience, value-props, objections
+    _DOMAIN_FILE_MAP = [
+        ("DOMAIN.md", "audience"),
+        ("value-props.md", "value_props"),
+        ("objections.md", "objections"),
+    ]
     domains_dir = CONTEXT_DIR / "domains"
     if domains_dir.is_dir():
         for domain in sorted(domains_dir.iterdir()):
             if not domain.is_dir():
                 continue
-            for fname in ("DOMAIN.md", "value-props.md", "objections.md"):
+            for fname, key in _DOMAIN_FILE_MAP:
                 fpath = domain / fname
                 if fpath.exists():
-                    text = fpath.read_text(encoding="utf-8").strip()
-                    lines = [l for l in text.splitlines()
-                             if not l.startswith("<!--") and not l.startswith("-->")]
-                    text = "\n".join(lines).strip()
+                    text = _clean(fpath)
                     if text:
-                        parts.append(text)
+                        if key in sections:
+                            sections[key] += "\n\n" + text
+                        else:
+                            sections[key] = text
 
-    if not parts:
+    if not sections:
         return None
 
+    return sections
+
+
+def _format_context_for_prompt(ctx: dict[str, str]) -> str:
+    """Convert a structured context dict into labelled markdown for LLM prompts.
+
+    Each key gets a clear heading so the model can distinguish audience data
+    from objections, value-props, etc.
+    """
+    _SECTION_MAP = [
+        ("company_overview", "COMPANY OVERVIEW"),
+        ("audience", "TARGET AUDIENCE & DOMAIN"),
+        ("value_props", "VALUE PROPOSITIONS"),
+        ("objections", "OBJECTION HANDLING"),
+    ]
+    parts: list[str] = []
+    for key, heading in _SECTION_MAP:
+        text = ctx.get(key)
+        if text:
+            parts.append(f"## {heading}\n{text}")
     return "\n\n".join(parts)
 
 
-def _generate_prd_from_idea(user_idea, skill="custom"):
+def _summarize_context_for_idea(ctx: dict[str, str]) -> str:
+    """Extract a short project summary from structured context.
+
+    Used as ``user_idea`` so the LLM gets a concise overview instead of
+    the full business-context blob.  Returns at most ~200 chars.
+    """
+    overview = ctx.get("company_overview", "")
+    title = "Project"
+    for line in overview.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            title = stripped.lstrip("# ").strip()
+            break
+
+    # First non-heading, non-empty line as description
+    for line in overview.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            desc = stripped.split(".")[0].strip()
+            if len(desc) > 10:
+                return f"{title}: {desc}"
+            break
+
+    return title
+
+
+def _read_design_choices() -> str:
+    """Read design choices from context/company/brand-assets/.
+
+    Returns a string describing the user's design settings (colors, font,
+    style) ready for injection into the PRD generation prompt, or empty
+    string if no design files exist.
+    """
+    brand_dir = CONTEXT_DIR / "company" / "brand-assets"
+    parts: list[str] = []
+
+    colors_path = brand_dir / "colors.json"
+    if colors_path.exists():
+        try:
+            colors = json.loads(colors_path.read_text(encoding="utf-8"))
+            primary = colors.get("primary", "")
+            secondary = colors.get("secondary", "")
+            style_key = colors.get("style", "")
+            bg = colors.get("backgrounds", {}).get("main", "")
+            text_color = colors.get("text", {}).get("primary", "")
+            if primary:
+                parts.append(f"Primary color: {primary}")
+            if secondary:
+                parts.append(f"Accent color: {secondary}")
+            if bg:
+                parts.append(f"Background: {bg}")
+            if text_color:
+                parts.append(f"Text color: {text_color}")
+            if style_key:
+                parts.append(f"Visual style: {style_key}")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    typo_path = brand_dir / "typography.json"
+    if typo_path.exists():
+        try:
+            typo = json.loads(typo_path.read_text(encoding="utf-8"))
+            font = typo.get("family", "")
+            if font:
+                parts.append(f"Font: {font}")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if not parts:
+        return ""
+    return (
+        "DESIGN SETTINGS (from user's init choices — use these EXACT values):\n"
+        + "\n".join(f"- {p}" for p in parts)
+    )
+
+
+def _generate_prd_from_idea(user_idea, skill="custom", context=""):
     """Call Kimi to generate a structured PRD from a project idea.
 
-    When *skill* is ``'landing-page'`` or ``'api-backend'``, a constraint
-    preamble is prepended so the LLM doesn't hallucinate an enterprise
-    platform when the user asked for a static HTML page.
+    Reads design choices from ``context/company/brand-assets/`` and
+    injects them so the generated PRD uses the user's exact colors,
+    font, and visual style.
+
+    When *skill* is ``'landing-page'`` or ``'api-backend'``, the
+    constraint is the **first thing** in the system prompt so the LLM
+    cannot ignore it.
 
     Returns (prd_markdown, title) or (None, None) on failure.
     """
-    prompt = PRD_FROM_IDEA_PROMPT.format(user_idea=user_idea)
+    # ── Skill constraint (highest priority) ──
     skill_constraint = SKILL_PRD_CONSTRAINTS.get(skill, "")
+
+    # ── Design choices from init ──
+    design_choices = _read_design_choices()
+
+    # ── Business context (primary input) ──
+    context_section = ""
+    if context:
+        context_section = (
+            "--- BUSINESS CONTEXT (PRIMARY INPUT — this is the most important data) ---\n\n"
+            f"{context}\n\n"
+            "--- END BUSINESS CONTEXT ---\n\n"
+            "INSTRUCTIONS: The business context above is the PRIMARY input for this PRD.\n"
+            "- The 'audience.roles' field MUST reflect the roles and concerns from TARGET AUDIENCE\n"
+            "- The 'value_propositions' field MUST use the data from VALUE PROPOSITIONS\n"
+            "- The 'objection_handling' field MUST address objections from OBJECTION HANDLING\n"
+            "- The 'key_messages' MUST come from the domain context\n"
+            "- The 'competitive_positioning' MUST reference competitor benchmarks if available\n"
+            "- Features should be designed to DELIVER the value propositions and ADDRESS objections\n\n"
+        )
+
+    # ── Build prompt ──
+    prompt_parts: list[str] = []
     if skill_constraint:
-        prompt = skill_constraint + "\n\n" + prompt
-    raw = call_llm(
-        prompt,
-        system="You are a senior product manager. Respond only with valid JSON.",
+        prompt_parts.append(skill_constraint)
+    if design_choices:
+        prompt_parts.append(design_choices)
+    prompt_parts.append(
+        PRD_FROM_IDEA_PROMPT.format(
+            user_idea=user_idea, context_section=context_section,
+        )
     )
+    prompt = "\n\n".join(prompt_parts)
+
+    # ── System message: skill constraint FIRST ──
+    system_parts: list[str] = []
+    if skill_constraint:
+        system_parts.append(skill_constraint)
+    if design_choices:
+        system_parts.append(
+            "The user already chose specific design settings during init. "
+            "The PRD MUST include these exact values in a Design section. "
+            "Do NOT invent different colors, fonts, or styles."
+        )
+    system_parts.append(
+        "You are a senior product manager. Respond only with valid JSON."
+    )
+    system_msg = "\n\n".join(system_parts)
+
+    raw = call_llm(prompt, system=system_msg)
     if not raw:
         return None, None
 
@@ -291,21 +468,94 @@ def _generate_prd_from_idea(user_idea, skill="custom"):
 
     title = data["title"]
     problem = data.get("problem", "")
+    audience_data = data.get("audience", "")
+    value_props = data.get("value_propositions", {})
+    key_messages = data.get("key_messages", [])
+    objections = data.get("objection_handling", [])
+    positioning = data.get("competitive_positioning", "")
     features = data.get("features", [])
     stack = data.get("stack", {})
     out_of_scope = data.get("out_of_scope", [])
+    success_metric = data.get("success_metric", "")
 
     # Build markdown
     md = f"# {title}\n\n"
     md += f"## Problem\n{problem}\n\n"
+
+    # Audience — handle both old format (string) and new format (dict)
+    if isinstance(audience_data, dict):
+        primary = audience_data.get("primary", "")
+        roles = audience_data.get("roles", [])
+        if primary:
+            md += f"## Audience\n{primary}\n\n"
+        if roles:
+            md += "### Audience Roles\n"
+            md += "| Role | Top Concern |\n|------|-------------|\n"
+            for r in roles:
+                md += f"| {r.get('role', '')} | {r.get('top_concern', '')} |\n"
+            md += "\n"
+    elif audience_data:
+        md += f"## Audience\n{audience_data}\n\n"
+
+    # Value Propositions
+    if value_props and isinstance(value_props, dict):
+        md += "## Value Propositions\n"
+        main_prop = value_props.get("main", "")
+        if main_prop:
+            md += f"**Main:** {main_prop}\n\n"
+        for vp in value_props.get("secondary", []):
+            if isinstance(vp, dict):
+                md += f"- **{vp.get('prop', '')}**\n"
+                proof = vp.get("proof_point", "")
+                if proof:
+                    md += f"  - Evidence: {proof}\n"
+            else:
+                md += f"- {vp}\n"
+        md += "\n"
+
+    # Key Messages
+    if key_messages:
+        md += "## Key Messages\n"
+        for msg in key_messages:
+            md += f"- {msg}\n"
+        md += "\n"
+
+    # Objection Handling
+    if objections:
+        md += "## Objection Handling\n"
+        for obj in objections:
+            if isinstance(obj, dict):
+                md += f"- **Objection:** {obj.get('objection', '')}\n"
+                md += f"  - **Response:** {obj.get('response', '')}\n"
+            else:
+                md += f"- {obj}\n"
+        md += "\n"
+
+    # Competitive Positioning
+    if positioning:
+        md += f"## Competitive Positioning\n{positioning}\n\n"
+
+    # Features
     md += "## Features\n"
     for f in features:
-        md += f"- {f}\n"
+        # Support both old format (string) and new format (dict with name/description/done_when)
+        if isinstance(f, dict):
+            name = f.get("name", "")
+            desc = f.get("description", "")
+            done = f.get("done_when", "")
+            md += f"- **{name}**: {desc}\n"
+            if done:
+                md += f"  - ✅ Done when: {done}\n"
+        else:
+            md += f"- {f}\n"
+
+    # Stack
     md += "\n## Stack\n"
     lang = stack.get("language", "")
     fw = stack.get("framework", "")
     db = stack.get("database", "")
     extras = stack.get("extras", [])
+    rationale = stack.get("rationale", "")
     if lang and fw:
         md += f"- {lang} + {fw}\n"
     elif lang:
@@ -314,18 +564,28 @@ def _generate_prd_from_idea(user_idea, skill="custom"):
         md += f"- {db}\n"
     for ex in extras:
         md += f"- {ex}\n"
+    if rationale:
+        md += f"- Rationale: {rationale}\n"
+    if success_metric:
+        md += f"\n## Success Metric\n{success_metric}\n"
     md += "\n## Out of Scope\n"
     for item in out_of_scope:
         md += f"- {item}\n"
 
+    # Append design choices so they survive in the PRD on disk
+    if design_choices:
+        md += f"\n## Design\n{design_choices}\n"
+
     return md.strip(), title
 
 
-def _scratch_flow(existing_context: str | None = None, skill: str = "custom"):
+def _scratch_flow(existing_context: dict[str, str] | None = None, skill: str = "custom"):
     """Interactive flow to create a PRD from scratch (or from existing context).
 
-    When *existing_context* is provided (from context_setup), the "Describe
-    your project idea" prompt is skipped and the context is used directly.
+    When *existing_context* is provided (structured dict from
+    ``_read_existing_context``), a short summary is used as the idea and
+    the full labelled context is passed separately so the LLM treats it
+    as structured requirements.
 
     *skill* is forwarded to ``_generate_prd_from_idea`` so the LLM prompt
     includes project-type constraints (e.g. "Landing Page = HTML only").
@@ -339,12 +599,15 @@ def _scratch_flow(existing_context: str | None = None, skill: str = "custom"):
     print(f"  Let's enrich your PRD with expert review.")
     print()
 
-    # If context already exists from context_setup, use it directly
+    # If structured context exists from context_setup, derive a short
+    # idea summary and a labelled business-context string — no duplication.
     if existing_context:
-        idea = existing_context
+        idea = _summarize_context_for_idea(existing_context)
+        biz_context = _format_context_for_prompt(existing_context)
         print(f"  {DIM}Using project context from setup...{RESET}")
     else:
         idea = None
+        biz_context = ""
 
     while True:
         if idea is None:
@@ -362,7 +625,9 @@ def _scratch_flow(existing_context: str | None = None, skill: str = "custom"):
 
         # Call Kimi to generate PRD
         print(f"\n  {DIM}Generating PRD draft...{RESET}")
-        prd_content, title = _generate_prd_from_idea(idea, skill=skill)
+        prd_content, title = _generate_prd_from_idea(
+            idea, skill=skill, context=biz_context,
+        )
 
         if not prd_content:
             print(f"  {RED}Could not generate PRD (Kimi unavailable or invalid response).{RESET}")
@@ -400,8 +665,17 @@ def _scratch_flow(existing_context: str | None = None, skill: str = "custom"):
             return prd_content, True
 
         elif choice == "2":
-            # Loop back to ask for description again (reset idea so prompt shows)
-            idea = None
+            # Ask for new description and regenerate immediately
+            print(f"\n  {BOLD}New description (2-3 sentences):{RESET}")
+            _flush_stdin()
+            try:
+                new_idea = input(f"  {BOLD}>{RESET} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            if new_idea:
+                idea = new_idea
+            # Loop back to regenerate with the new (or unchanged) idea
             print()
             continue
 
@@ -824,8 +1098,12 @@ def _collect_design_context() -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="", research_log=None):
-    """Call Kimi to generate the enriched PRD."""
+def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="", research_log=None, skill="custom"):
+    """Call Kimi to generate the enriched PRD.
+
+    When *skill* is ``'landing-page'``, the section headings are adapted
+    so the LLM doesn't hallucinate backend architecture for a static page.
+    """
     # Format Q&A transcript
     transcript_text = ""
     for item in qa_transcript:
@@ -836,6 +1114,28 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
         )
 
     experts_text = ", ".join(f"{e['name']} ({e['field']})" for e in experts)
+
+    # Skill-appropriate section headings
+    if skill == "landing-page":
+        sections_text = (
+            f"1. Keep the original PRD intact at the beginning\n"
+            f"2. Add section '## Page Content Decisions' with copy/messaging answers, "
+            f"marked [FACT], [DECISION], or [ASSUMPTION]\n"
+            f"3. Add section '## Audience & Conversion Strategy' with product answers\n"
+            f"4. Add section '## Accessibility & Performance' with any accessibility/perf answers\n"
+            f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
+            f"with assumption count"
+        )
+    else:
+        sections_text = (
+            f"1. Keep the original PRD intact at the beginning\n"
+            f"2. Add section '## Technical Decisions' with architecture answers, "
+            f"marked [FACT], [DECISION], or [ASSUMPTION]\n"
+            f"3. Add section '## Product Strategy' with product answers\n"
+            f"4. Add section '## Security and Edge Cases' with security answers\n"
+            f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
+            f"with assumption count"
+        )
 
     design_section = ""
     if design_context:
@@ -855,26 +1155,26 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
             f"research results gathered during planning:\n{research_text}\n"
         )
 
+    # Inject skill constraint into system message so the LLM stays on track
+    skill_constraint = SKILL_PRD_CONSTRAINTS.get(skill, "")
+    system_msg = (
+        "You are a senior technical writer. Generate a complete enriched PRD "
+        "in markdown. Respond ONLY with the PRD, no JSON, no preamble."
+    )
+    if skill_constraint:
+        system_msg = skill_constraint + "\n\n" + system_msg
+
     raw = call_llm(
         f"The experts ({experts_text}) have received the user's answers. "
         f"Generate the enriched PRD.\n\n"
         f"Experts and their questions/answers:\n{transcript_text}\n"
         f"Original PRD:\n{prd_content}\n\n"
         f"Generate a complete PRD that incorporates all answers. Structure:\n"
-        f"1. Keep the original PRD intact at the beginning\n"
-        f"2. Add section '## Technical Decisions' with architecture answers, "
-        f"marked [FACT], [DECISION], or [ASSUMPTION]\n"
-        f"3. Add section '## Product Strategy' with product answers\n"
-        f"4. Add section '## Security and Edge Cases' with security answers\n"
-        f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
-        f"with assumption count"
+        f"{sections_text}"
         f"{design_section}"
         f"{research_section}\n\n"
         f"Respond ONLY with the complete PRD in markdown.",
-        system=(
-            "You are a senior technical writer. Generate a complete enriched PRD "
-            "in markdown. Respond ONLY with the PRD, no JSON, no preamble."
-        ),
+        system=system_msg,
     )
     if raw:
         # Strip markdown wrappers if present
@@ -1256,11 +1556,15 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     print(f"\n  {DIM}Incorporating product decisions into PRD...{RESET}")
 
     what_enriched = _generate_enriched_prd(
-        prd_content, what_transcript, what_experts,
+        prd_content, what_transcript, what_experts, skill=skill,
     )
     if not what_enriched:
         # Manual fallback
-        what_enriched = prd_content + "\n\n## Product Decisions\n\n"
+        fallback_heading = (
+            "## Page Content Decisions" if skill == "landing-page"
+            else "## Product Decisions"
+        )
+        what_enriched = prd_content + f"\n\n{fallback_heading}\n\n"
         for a in what_transcript:
             what_enriched += f"- [{a['tag']}] {a['question']}: {a['answer']}\n"
 
@@ -1323,7 +1627,7 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     print(f"\n  {DIM}Generating final enriched PRD...{RESET}")
 
     enriched_prd = _generate_enriched_prd(
-        what_enriched, how_transcript, unique_experts, design_context, all_research,
+        what_enriched, how_transcript, unique_experts, design_context, all_research, skill=skill,
     )
 
     if not enriched_prd:
@@ -1331,7 +1635,11 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         assumptions = sum(1 for a in all_transcript if a["tag"] == "ASSUMPTION")
         print(f"  {YELLOW}LLM did not respond. Generating PRD manually.{RESET}")
         enriched_prd = what_enriched + "\n"
-        enriched_prd += "\n## Technical Decisions\n\n"
+        tech_heading = (
+            "## Implementation Notes" if skill == "landing-page"
+            else "## Technical Decisions"
+        )
+        enriched_prd += f"\n{tech_heading}\n\n"
         for a in how_transcript:
             enriched_prd += f"- [{a['tag']}] {a['question']}: {a['answer']}\n"
         enriched_prd += f"\n## Assumption Density: {assumptions}/{len(all_transcript)}\n"
