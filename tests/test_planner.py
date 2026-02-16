@@ -393,3 +393,201 @@ class TestDetectSkill:
         from forja.planner import _detect_skill
         monkeypatch.chdir(tmp_path)
         assert _detect_skill() == "custom"
+
+
+class TestRunExpertQa:
+    """Verify _run_expert_qa orchestrates a full Q&A round."""
+
+    def test_fallback_when_llm_returns_none(self):
+        """When LLM returns None, uses fallback experts and questions."""
+        from forja.planner import (
+            _run_expert_qa, WHAT_PANEL_PROMPT,
+            FALLBACK_WHAT_EXPERTS, FALLBACK_WHAT_QUESTIONS,
+        )
+        # Simulate user pressing Enter (accept default) for all questions
+        with patch("forja.planner.call_llm", return_value=None), \
+             patch("builtins.input", return_value=""):
+            experts, questions, transcript, research, assessment = _run_expert_qa(
+                prompt_template=WHAT_PANEL_PROMPT,
+                fallback_experts=FALLBACK_WHAT_EXPERTS,
+                fallback_questions=FALLBACK_WHAT_QUESTIONS,
+                prd_content="# Test PRD",
+                prd_title="Test",
+                context="",
+                skill_guidance="",
+                round_label="WHAT",
+                max_questions=6,
+            )
+        assert len(experts) >= 2
+        assert len(transcript) == len(questions)
+        # All answers are DECISION (accepted defaults)
+        assert all(a["tag"] == "DECISION" for a in transcript)
+
+    def test_done_fills_remaining_with_assumption(self):
+        """Typing 'done' fills remaining questions with ASSUMPTION defaults."""
+        from forja.planner import (
+            _run_expert_qa, HOW_PANEL_PROMPT,
+            FALLBACK_HOW_EXPERTS, FALLBACK_HOW_QUESTIONS,
+        )
+        # First answer: custom, second: "done"
+        inputs = iter(["My custom answer", "done"])
+        with patch("forja.planner.call_llm", return_value=None), \
+             patch("builtins.input", side_effect=inputs):
+            experts, questions, transcript, research, _ = _run_expert_qa(
+                prompt_template=HOW_PANEL_PROMPT,
+                fallback_experts=FALLBACK_HOW_EXPERTS,
+                fallback_questions=FALLBACK_HOW_QUESTIONS,
+                prd_content="# Test PRD",
+                prd_title="Test",
+                context="",
+                skill_guidance="",
+                round_label="HOW",
+                max_questions=7,
+            )
+        # First answer is FACT, rest are ASSUMPTION
+        assert transcript[0]["tag"] == "FACT"
+        assert transcript[0]["answer"] == "My custom answer"
+        assert all(a["tag"] == "ASSUMPTION" for a in transcript[1:])
+        assert len(transcript) == len(questions)
+
+    def test_returns_five_tuple(self):
+        """Return type is (experts, questions, transcript, research, assessment)."""
+        from forja.planner import (
+            _run_expert_qa, WHAT_PANEL_PROMPT,
+            FALLBACK_WHAT_EXPERTS, FALLBACK_WHAT_QUESTIONS,
+        )
+        with patch("forja.planner.call_llm", return_value=None), \
+             patch("builtins.input", return_value=""):
+            result = _run_expert_qa(
+                prompt_template=WHAT_PANEL_PROMPT,
+                fallback_experts=FALLBACK_WHAT_EXPERTS,
+                fallback_questions=FALLBACK_WHAT_QUESTIONS,
+                prd_content="# PRD",
+                prd_title="T",
+                context="",
+                skill_guidance="",
+                round_label="WHAT",
+            )
+        assert len(result) == 5
+        experts, questions, transcript, research, assessment = result
+        assert isinstance(experts, list)
+        assert isinstance(questions, list)
+        assert isinstance(transcript, list)
+        assert isinstance(research, list)
+        assert isinstance(assessment, str)
+
+
+class TestSkillGuidance:
+    """Verify skill-specific guidance for WHAT and HOW rounds."""
+
+    def test_what_landing_page(self):
+        from forja.planner import _get_skill_what_guidance
+        g = _get_skill_what_guidance("landing-page")
+        assert "CTA" in g
+        assert "tone" in g.lower() or "copy" in g.lower()
+
+    def test_what_api_backend(self):
+        from forja.planner import _get_skill_what_guidance
+        g = _get_skill_what_guidance("api-backend")
+        assert "endpoint" in g.lower()
+        assert "data model" in g.lower()
+
+    def test_how_landing_page(self):
+        from forja.planner import _get_skill_how_guidance
+        g = _get_skill_how_guidance("landing-page")
+        assert "HTML" in g or "html" in g.lower()
+
+    def test_how_api_backend(self):
+        from forja.planner import _get_skill_how_guidance
+        g = _get_skill_how_guidance("api-backend")
+        assert "FastAPI" in g or "Flask" in g
+        assert "SQLite" in g
+
+    def test_custom_returns_empty(self):
+        from forja.planner import _get_skill_what_guidance, _get_skill_how_guidance
+        assert _get_skill_what_guidance("custom") == ""
+        assert _get_skill_how_guidance("custom") == ""
+
+
+class TestFallbackConstants:
+    """Verify WHAT/HOW fallback experts and questions structure."""
+
+    def test_what_experts_are_product_focused(self):
+        from forja.planner import FALLBACK_WHAT_EXPERTS
+        assert len(FALLBACK_WHAT_EXPERTS) == 3
+        names = [e["name"] for e in FALLBACK_WHAT_EXPERTS]
+        assert "Product Strategist" in names
+        assert "Target Audience Expert" in names
+
+    def test_what_questions_count(self):
+        from forja.planner import FALLBACK_WHAT_QUESTIONS
+        assert len(FALLBACK_WHAT_QUESTIONS) == 6
+        for q in FALLBACK_WHAT_QUESTIONS:
+            assert "question" in q
+            assert "default" in q
+
+    def test_how_experts_have_build_feasibility(self):
+        from forja.planner import FALLBACK_HOW_EXPERTS
+        assert len(FALLBACK_HOW_EXPERTS) == 3
+        assert FALLBACK_HOW_EXPERTS[0]["name"] == "Build Feasibility Engineer"
+
+    def test_how_questions_count(self):
+        from forja.planner import FALLBACK_HOW_QUESTIONS
+        assert len(FALLBACK_HOW_QUESTIONS) == 7
+        # First question should be stack override
+        assert "STACK OVERRIDE" in FALLBACK_HOW_QUESTIONS[0]["question"]
+
+
+class TestSaveTranscriptRounds:
+    """Verify _save_transcript writes round-based JSON."""
+
+    def test_saves_with_rounds_key(self, tmp_path, monkeypatch):
+        from forja.planner import _save_transcript
+        monkeypatch.setattr("forja.planner.FORJA_DIR", tmp_path / ".forja")
+
+        round_data = [
+            {"round": "WHAT", "experts": [{"name": "PM"}],
+             "questions": [], "answers": [{"tag": "FACT", "answer": "yes"}]},
+            {"round": "HOW", "experts": [{"name": "Eng"}],
+             "questions": [], "answers": [{"tag": "DECISION", "answer": "FastAPI"}]},
+        ]
+        path = _save_transcript(round_data, "# Final PRD")
+        assert path.exists()
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert "rounds" in data
+        assert len(data["rounds"]) == 2
+        assert data["rounds"][0]["round"] == "WHAT"
+        assert data["rounds"][1]["round"] == "HOW"
+        assert data["enriched_prd_length"] == len("# Final PRD")
+
+    def test_saves_research_log(self, tmp_path, monkeypatch):
+        from forja.planner import _save_transcript
+        monkeypatch.setattr("forja.planner.FORJA_DIR", tmp_path / ".forja")
+
+        research = [{"topic": "auth", "findings": "Use JWT"}]
+        path = _save_transcript([], "# PRD", research)
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["research"] == research
+
+
+class TestPromptContent:
+    """Verify WHAT and HOW prompts have the correct focus."""
+
+    def test_what_prompt_is_product_focused(self):
+        from forja.planner import WHAT_PANEL_PROMPT
+        prompt = WHAT_PANEL_PROMPT.lower()
+        assert "product experts" in prompt
+        assert "target audience" in prompt
+        assert "messaging" in prompt
+        # Should NOT ask about technical details
+        assert "database" not in prompt or "do not ask about" in prompt
+
+    def test_how_prompt_is_technical_focused(self):
+        from forja.planner import HOW_PANEL_PROMPT
+        prompt = HOW_PANEL_PROMPT.lower()
+        assert "technical experts" in prompt
+        assert "veto power" in prompt
+        assert "build feasibility engineer" in prompt
+        assert "pip" in prompt or "npm" in prompt

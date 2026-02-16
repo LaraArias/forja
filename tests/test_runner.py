@@ -152,3 +152,42 @@ class TestPrdNeedsPlanning:
         content = "# Task Manager\n\n" + ("x " * 100) + "\n\n## Technical Decisions\n- [FACT] auth: JWT\n"
         prd.write_text(content, encoding="utf-8")
         assert _prd_needs_planning(prd) is False
+
+
+class TestGenerateWorkflowFeatures:
+    """Verify _generate_workflow_features creates correct feature files."""
+
+    def test_generate_workflow_features_creates_files(self, tmp_path):
+        """Workflow phases generate one features.json per agent."""
+        import json
+        from forja.runner import _generate_workflow_features
+
+        workflow_path = tmp_path / "workflow.json"
+        workflow = {
+            "phases": [
+                {"agent": "content-strategist", "role": "Content Strategy",
+                 "validation": "Generate copy-brief.md", "output": "copy-brief.md",
+                 "input": []},
+                {"agent": "frontend-builder", "role": "Frontend Build",
+                 "validation": "Build index.html", "output": "index.html",
+                 "input": ["copy-brief.md"]},
+                {"agent": "qa", "role": "QA", "validation": "All tests pass",
+                 "output": "qa-report.json", "input": ["index.html"]},
+            ]
+        }
+        workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
+
+        teammates_dir = tmp_path / "teammates"
+        _generate_workflow_features(workflow_path, teammates_dir)
+
+        # Check that 3 dirs and features.json were created
+        for i, phase in enumerate(workflow["phases"]):
+            agent = phase["agent"]
+            fj = teammates_dir / agent / "features.json"
+            assert fj.exists(), f"features.json missing for {agent}"
+            data = json.loads(fj.read_text())
+            feat = data["features"][0]
+            assert feat["id"] == f"{agent}-001"
+            assert feat["phase_order"] == i + 1
+            assert feat["status"] == "pending"
+            assert feat["output"] == phase["output"]

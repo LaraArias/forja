@@ -21,7 +21,7 @@ from pathlib import Path
 from forja.config_loader import load_config
 from forja.constants import (
     BUILD_PROMPT, CLAUDE_MD, CONTEXT_DIR, FORJA_DIR, FORJA_TOOLS,
-    PRD_PATH, STORE_DIR, TEAMMATES_DIR,
+    PRD_PATH, STORE_DIR, TEAMMATES_DIR, WORKFLOW_PATH,
 )
 from forja.utils import (
     BOLD, CYAN, DIM, GREEN, RED, YELLOW, RESET,
@@ -209,6 +209,37 @@ def _append_enrichment_to_prd(prd_path, enrichment, assumptions):
             block += f"- {a}\n"
 
     prd.write_text(content + block, encoding="utf-8")
+
+
+# ── Workflow-based feature generation ─────────────────────────────
+
+def _generate_workflow_features(workflow_path: Path, teammates_dir: Path):
+    """Generate features.json for each workflow phase.
+
+    When a workflow.json exists, features are organized by sequential
+    phases instead of independent epics.
+    """
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+    for i, phase in enumerate(workflow.get("phases", [])):
+        agent_name = phase["agent"]
+        agent_dir = teammates_dir / agent_name
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        features = {
+            "features": [{
+                "id": f"{agent_name}-001",
+                "description": phase.get("validation", f"Complete {phase.get('role', agent_name)} phase"),
+                "status": "pending",
+                "cycles": 0,
+                "phase_order": i + 1,
+                "input": phase.get("input", []),
+                "output": phase.get("output", ""),
+            }]
+        }
+        (agent_dir / "features.json").write_text(
+            json.dumps(features, indent=2), encoding="utf-8",
+        )
 
 
 # ── Phase 1: Context injection into CLAUDE.md ────────────────────────
@@ -922,6 +953,13 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     # ── Phase 1: Context Injection ──
     _phase_header(1, "Context Injection", 6)
     _inject_context_into_claude_md()
+
+    # ── Workflow-based features (when workflow.json exists) ──
+    if WORKFLOW_PATH.exists():
+        _generate_workflow_features(WORKFLOW_PATH, TEAMMATES_DIR)
+        wf = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
+        phase_count = len(wf.get("phases", []))
+        print(f"  {GREEN}workflow mode{RESET}: {phase_count} phases generated")
 
     # ── Launch Observatory Live (background) ──
     observatory_proc = _start_observatory_live()

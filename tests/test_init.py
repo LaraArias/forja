@@ -152,3 +152,56 @@ class TestInitDirectoryValidation:
     def test_rejects_tmp(self):
         from forja.init import run_init
         assert run_init(directory="/tmp", force=True) is False
+
+
+class TestCopySkill:
+    """Tests for _copy_skill copying agents.json and workflow.json."""
+
+    def test_copies_agents_and_workflow(self, tmp_path):
+        from forja.init import _copy_skill, FORJA_TOOLS
+        tools_dir = tmp_path / FORJA_TOOLS
+        tools_dir.mkdir(parents=True)
+
+        _copy_skill(tmp_path, "landing-page")
+
+        skill_json = tools_dir / "skill.json"
+        workflow_json = tools_dir / "workflow.json"
+
+        assert skill_json.exists()
+        assert workflow_json.exists()
+
+        skill_data = json.loads(skill_json.read_text(encoding="utf-8"))
+        assert skill_data["skill"] == "landing-page"
+
+        workflow_data = json.loads(workflow_json.read_text(encoding="utf-8"))
+        assert workflow_data["name"] == "landing-page"
+        assert workflow_data["execution"] == "sequential"
+        assert len(workflow_data["phases"]) == 5
+
+    def test_copies_api_backend_workflow(self, tmp_path):
+        from forja.init import _copy_skill, FORJA_TOOLS
+        tools_dir = tmp_path / FORJA_TOOLS
+        tools_dir.mkdir(parents=True)
+
+        _copy_skill(tmp_path, "api-backend")
+
+        workflow_json = tools_dir / "workflow.json"
+        assert workflow_json.exists()
+
+        workflow_data = json.loads(workflow_json.read_text(encoding="utf-8"))
+        assert workflow_data["name"] == "api-backend"
+        assert len(workflow_data["phases"]) == 5
+        agent_names = [p["agent"] for p in workflow_data["phases"]]
+        assert "architect" in agent_names
+        assert "qa" in agent_names
+
+    def test_handles_missing_skill(self, tmp_path):
+        from forja.init import _copy_skill, FORJA_TOOLS
+        tools_dir = tmp_path / FORJA_TOOLS
+        tools_dir.mkdir(parents=True)
+
+        # Should not crash on nonexistent skill
+        _copy_skill(tmp_path, "nonexistent-skill")
+
+        assert not (tools_dir / "skill.json").exists()
+        assert not (tools_dir / "workflow.json").exists()

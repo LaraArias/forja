@@ -101,6 +101,17 @@ def _read_outcome():
         return None
 
 
+def _read_workflow():
+    """Read .forja/workflow.json if it exists."""
+    p = Path(".forja") / "workflow.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _read_learnings():
     """Read context/learnings/*.jsonl."""
     entries = []
@@ -193,12 +204,45 @@ def _read_src_stats():
     return stats, total_files, total_lines
 
 
+# ── Workflow helpers ─────────────────────────────────────────────────
+
+def _build_workflow_phases(workflow, per_teammate):
+    """Build workflow phase data for the dashboard."""
+    if not workflow:
+        return []
+    phases = []
+    for i, phase in enumerate(workflow.get("phases", [])):
+        agent = phase.get("agent", "?")
+        tm = per_teammate.get(agent, {})
+        total = tm.get("total", 0)
+        passed = tm.get("passed", 0)
+        blocked = tm.get("blocked", 0)
+        if total == 0:
+            status = "waiting"
+        elif passed == total:
+            status = "done"
+        elif blocked > 0:
+            status = "blocked"
+        elif passed > 0 or tm.get("failed", 0) > 0:
+            status = "active"
+        else:
+            status = "waiting"
+        phases.append({
+            "order": i + 1,
+            "agent": agent,
+            "role": phase.get("role", agent),
+            "output": phase.get("output", ""),
+            "status": status,
+        })
+    return phases
+
+
 # ── Metrics computation ──────────────────────────────────────────────
 
 def _compute_metrics(teammates, spec_review, plan_transcript,
                      crossmodel_issues, outcome, learnings, commits,
                      src_stats, total_files, total_lines,
-                     feature_events=None):
+                     feature_events=None, workflow=None):
     """Compute all metrics from raw data."""
 
     # ── Spec Review ──
@@ -391,6 +435,8 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
         "feature_events": feature_events or [],
         # Roadmap
         "roadmap": roadmap,
+        # Workflow pipeline (when workflow.json exists)
+        "workflow_phases": _build_workflow_phases(workflow, per_teammate) if workflow else [],
     }
 
 
@@ -497,6 +543,8 @@ def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=
         "feature_events": m["feature_events"][:200],
         # Roadmap
         "roadmap": m["roadmap"],
+        # Workflow pipeline
+        "workflow_phases": m.get("workflow_phases", []),
     }
 
 
@@ -558,6 +606,7 @@ def cmd_report():
     plan_transcript = _read_plan_transcript()
     crossmodel_issues = _read_crossmodel()
     outcome = _read_outcome()
+    workflow = _read_workflow()
     learnings = _read_learnings()
     feature_events = _read_feature_events()
     commits = _read_git_log()
@@ -570,7 +619,7 @@ def cmd_report():
     metrics = _compute_metrics(
         teammates, spec_review, plan_transcript, crossmodel_issues,
         outcome, learnings, commits, src_stats, total_files, total_lines,
-        feature_events=feature_events,
+        feature_events=feature_events, workflow=workflow,
     )
 
     run_path = _save_run(metrics)
@@ -632,6 +681,7 @@ def cmd_live():
             plan_transcript = _read_plan_transcript()
             crossmodel_issues = _read_crossmodel()
             outcome = _read_outcome()
+            workflow = _read_workflow()
             learnings = _read_learnings()
             feature_events = _read_feature_events()
             commits = _read_git_log()
@@ -641,7 +691,7 @@ def cmd_live():
             metrics = _compute_metrics(
                 teammates, spec_review, plan_transcript, crossmodel_issues,
                 outcome, learnings, commits, src_stats, total_files, total_lines,
-                feature_events=feature_events,
+                feature_events=feature_events, workflow=workflow,
             )
 
             all_runs = _load_all_runs()
@@ -680,7 +730,7 @@ def cmd_live():
                 metrics = _compute_metrics(
                     teammates, spec_review, plan_transcript, crossmodel_issues,
                     outcome, learnings, commits, src_stats, total_files, total_lines,
-                    feature_events=feature_events,
+                    feature_events=feature_events, workflow=workflow,
                 )
                 # Write final HTML without auto-refresh
                 html_content = _generate_html(metrics, all_runs,
@@ -703,6 +753,7 @@ def cmd_live():
         plan_transcript = _read_plan_transcript()
         crossmodel_issues = _read_crossmodel()
         outcome = _read_outcome()
+        workflow = _read_workflow()
         learnings = _read_learnings()
         feature_events = _read_feature_events()
         commits = _read_git_log()
@@ -710,7 +761,7 @@ def cmd_live():
         metrics = _compute_metrics(
             teammates, spec_review, plan_transcript, crossmodel_issues,
             outcome, learnings, commits, src_stats, total_files, total_lines,
-            feature_events=feature_events,
+            feature_events=feature_events, workflow=workflow,
         )
         all_runs = _load_all_runs()
         html_content = _generate_html(metrics, all_runs, live_mode=False)

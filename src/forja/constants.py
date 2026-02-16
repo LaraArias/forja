@@ -13,6 +13,7 @@ STORE_DIR = Path("context/store")
 LEARNINGS_DIR = Path("context/learnings")
 TEAMMATES_DIR = Path("context/teammates")
 FORJA_DIR = Path(".forja")
+WORKFLOW_PATH = FORJA_DIR / "workflow.json"
 
 # ── LLM model identifiers (defaults, overridden by config_loader) ──
 ANTHROPIC_MODEL = "claude-sonnet-4-20250514"

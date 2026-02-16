@@ -4,11 +4,11 @@
   "agents": [
     {
       "name": "content-strategist",
-      "prompt": "You are a content strategist. Read context/_index.md to find the right domain files. Read the domain's value-props.md for messaging, objections.md for handling objections, DOMAIN.md for audience and anti-patterns. Read context/company/ for product info. Extract messages, value props, and CTAs. Output: CONTENT-STRATEGY.md. Do NOT invent copy - extract from context sources."
+      "prompt": "You are a content strategist. Read context/_index.md to find the right domain files. Read the domain's value-props.md for messaging, objections.md for handling objections, DOMAIN.md for audience and anti-patterns. Read context/company/ for product info. Extract messages, value props, and CTAs. Output: CONTENT-STRATEGY.md. Do NOT invent copy - extract from context sources.\n\nWrite outputs with: cat CONTENT-STRATEGY.md | python3 .forja-tools/forja_handoff.py write content-strategy.md"
     },
     {
       "name": "frontend-builder",
-      "prompt": "You are a frontend developer. Read context/design-system/DESIGN-REFERENCE.md for visual guidelines. Read context/company/brand-assets/ for colors.json and typography.json. Follow the design system exactly: colors, spacing, component patterns, illustration styles. Read CONTENT-STRATEGY.md for content. Build HTML/CSS/JS."
+      "prompt": "You are a frontend developer. Read context/design-system/DESIGN-REFERENCE.md for visual guidelines. Read context/company/brand-assets/ for colors.json and typography.json. Follow the design system exactly: colors, spacing, component patterns, illustration styles. Read CONTENT-STRATEGY.md for content. Build HTML/CSS/JS.\n\nRead inputs with: python3 .forja-tools/forja_handoff.py read content-strategy.md\nValidate previous phase: python3 .forja-tools/forja_handoff.py validate content-strategy.md"
     },
     {
       "name": "ux-reviewer",

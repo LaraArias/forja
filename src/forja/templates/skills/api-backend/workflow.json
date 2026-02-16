@@ -1,0 +1,48 @@
+{
+  "name": "api-backend",
+  "description": "REST API backend pipeline",
+  "execution": "sequential",
+  "phases": [
+    {
+      "agent": "architect",
+      "role": "Software Architect",
+      "input": ["context/prd.md", "context/company/"],
+      "output": "artifacts/architecture.md",
+      "prompt": "You are the Architect. Read the PRD. Design: data model (entities, relationships, constraints), endpoint list with request/response schemas, error handling strategy, file structure. Output to artifacts/architecture.md. Do NOT write implementation code.",
+      "validation": "architecture.md exists with data model and endpoint list"
+    },
+    {
+      "agent": "database",
+      "role": "Database Engineer",
+      "input": ["artifacts/architecture.md"],
+      "output": "src/database.py,src/models.py",
+      "prompt": "You are the Database Engineer. Read architecture.md. Implement: SQLAlchemy models, database initialization, migration setup. Follow the data model EXACTLY. Output to src/database.py and src/models.py. Do NOT implement API endpoints.",
+      "validation": "models.py exists with all entities from architecture"
+    },
+    {
+      "agent": "backend",
+      "role": "Backend Developer",
+      "input": ["artifacts/architecture.md", "src/models.py"],
+      "output": "src/main.py,src/schemas.py,src/routers/",
+      "prompt": "You are the Backend Developer. Read architecture.md and models.py. Implement: FastAPI endpoints, Pydantic schemas, request validation, error handling. Follow the endpoint specs EXACTLY. Use the models as-is, do NOT modify them.",
+      "validation": "main.py exists, all endpoints from architecture implemented"
+    },
+    {
+      "agent": "security",
+      "role": "Security Engineer",
+      "input": ["src/"],
+      "output": "src/",
+      "prompt": "You are Security. Review all source files for: SQL injection, input validation gaps, missing error handling, information leakage in error responses. Fix any issues found. Add rate limiting if not present. Do NOT change business logic or API contracts.",
+      "validation": "no obvious security issues in source files"
+    },
+    {
+      "agent": "qa",
+      "role": "QA Engineer",
+      "input": ["src/", "artifacts/architecture.md"],
+      "output": ".forja/qa-report.json",
+      "prompt": "You are QA. Install deps: pip install httpx pytest. Start server: python3 -m uvicorn src.main:app --port 8765 &. Wait 3s. Write tests in tests/test_api.py covering EVERY endpoint from architecture.md: success cases, error cases (400, 404, 422), edge cases. Run: python3 -m pytest tests/ -v. Report results.",
+      "tool": "httpx",
+      "validation": "test_api.py exists, tests ran, qa-report.json has results"
+    }
+  ]
+}

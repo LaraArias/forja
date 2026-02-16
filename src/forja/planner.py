@@ -412,28 +412,9 @@ def _gather_context() -> str:
     return "\n".join(parts) if parts else "No prior context available."
 
 
-# ── Expert panel prompt ─────────────────────────────────────────────
+# ── Expert panel prompts (Round 1: WHAT, Round 2: HOW) ─────────────
 
-EXPERT_PANEL_PROMPT = """\
-You are a conductor of expertise bringing together real-world experts to analyze a software PRD before it gets built.
-
-Choose 3 specific, real experts relevant to THIS project (not generic roles). For example:
-- If it's a fintech API: maybe Stripe's API design lead, a banking compliance expert, and a distributed systems architect
-- If it's a notes app: maybe a UX researcher who studied note-taking, a SQLite expert, and a security engineer from a productivity company
-
-IMPORTANT: At least one of the 3 experts MUST focus on implementation feasibility —
-someone who can evaluate whether the tech stack is realistic, whether dependencies
-are pip/npm installable, and whether the scope fits a single autonomous build session.
-
-If the project has a user interface, one expert MUST be a UX/Design expert who asks about: visual hierarchy, color accessibility WCAG AA, responsive breakpoints, interaction patterns, and design system consistency.
-
-For each expert:
-1. Have them speak in their authentic voice about what concerns them about this PRD
-2. Have them ask ONE critical question that must be answered before building
-3. Have them suggest a default answer based on their experience
-
-Then synthesize into 8 total questions across the 3 experts, ordered by impact.
-
+_PANEL_JSON_SCHEMA = """\
 Return ONLY valid JSON, no markdown wrapping:
 {
   "experts": [
@@ -449,8 +430,73 @@ Return ONLY valid JSON, no markdown wrapping:
     }
   ],
   "initial_assessment": "2-line assessment of the PRD with the experts' voices"
-}\
-"""
+}"""
+
+WHAT_PANEL_PROMPT = (
+    "You are a conductor of expertise bringing together PRODUCT experts to analyze "
+    "a software PRD. This is Round 1: deciding WHAT to build.\n\n"
+    "Generate 2-3 PRODUCT experts for this project. Focus on: target audience, "
+    "messaging, user experience, competitive positioning, content strategy. "
+    "Do NOT ask about architecture, databases, or deployment. Ask about: who is "
+    "the user, what problem does this solve, what does the user see/feel, what "
+    "are the key messages, what sections or features matter most.\n\n"
+    "For each expert:\n"
+    "1. Speak in their authentic voice about what concerns them\n"
+    "2. Ask ONE critical question that must be answered before building\n"
+    "3. Suggest a default answer based on their experience\n\n"
+    "Synthesize into 6 total questions ordered by impact.\n\n"
+    + _PANEL_JSON_SCHEMA
+)
+
+HOW_PANEL_PROMPT = (
+    "You are a conductor of expertise bringing together TECHNICAL experts to "
+    "analyze a software PRD. This is Round 2: deciding HOW to build it. "
+    "The product content (what to build) is already decided - only discuss "
+    "HOW to build it.\n\n"
+    "Generate 2-3 TECHNICAL experts. One MUST be the Build Feasibility Engineer "
+    "with VETO POWER over the stack. Focus on: tech stack, dependencies, build "
+    "constraints, architecture, performance, security.\n\n"
+    "CRITICAL: Claude Code can only install packages via pip or npm. It CANNOT "
+    "install Redis, PostgreSQL, Docker, Kafka, or any system service. The Build "
+    "Feasibility Engineer must OVERRIDE any incompatible stack.\n\n"
+    "For each expert:\n"
+    "1. Evaluate the technical feasibility of the PRD\n"
+    "2. Ask ONE critical question about HOW to build it\n"
+    "3. Suggest a concrete default\n\n"
+    "Synthesize into 7 total questions ordered by impact.\n\n"
+    + _PANEL_JSON_SCHEMA
+)
+
+FALLBACK_WHAT_EXPERTS = [
+    {"name": "Product Strategist", "field": "Product Strategy", "perspective": "Evaluating viability, user flows, and product-market fit."},
+    {"name": "Target Audience Expert", "field": "User Research", "perspective": "Evaluating who the user is and what they actually need."},
+    {"name": "Domain Expert", "field": "Industry Context", "perspective": "Evaluating competitive positioning and domain best practices."},
+]
+
+FALLBACK_WHAT_QUESTIONS = [
+    {"id": 1, "expert_name": "Target Audience Expert", "question": "Who is the primary user and what problem are they trying to solve?", "why": "Without this, the team optimizes for the wrong user.", "default": "Individual developer, solving productivity pain."},
+    {"id": 2, "expert_name": "Target Audience Expert", "question": "What does the user see and feel when they first use this?", "why": "First impression determines retention.", "default": "Clean, fast, no-signup-required first interaction."},
+    {"id": 3, "expert_name": "Product Strategist", "question": "What are the key sections, pages, or endpoints?", "why": "Defines MVP scope and build order.", "default": "3-5 core pages/endpoints that deliver the main value."},
+    {"id": 4, "expert_name": "Product Strategist", "question": "What does success look like? What metric or outcome?", "why": "Without a goal, there is no way to measure if it works.", "default": "User completes the core flow end-to-end in under 2 minutes."},
+    {"id": 5, "expert_name": "Domain Expert", "question": "What are the key messages or value propositions?", "why": "Messaging drives conversion and retention.", "default": "Simple, fast, focused on one thing done well."},
+    {"id": 6, "expert_name": "Domain Expert", "question": "What competitive alternatives exist and how is this different?", "why": "Positioning determines feature priority.", "default": "Simpler and more focused than existing tools."},
+]
+
+FALLBACK_HOW_EXPERTS = [
+    dict(TECHNICAL_EXPERT),
+    {"name": "Stack Specialist", "field": "Framework & Library Selection", "perspective": "Choosing the right tools for the job within build constraints."},
+    {"name": "Security & Performance Engineer", "field": "Security & Performance", "perspective": "Evaluating attack surface, data handling, and runtime performance."},
+]
+
+FALLBACK_HOW_QUESTIONS = [
+    {"id": 1, "expert_name": "Build Feasibility Engineer", "question": "STACK OVERRIDE CHECK: Does the PRD specify any technology Claude Code cannot install?", "why": "Claude Code can only install via pip/npm. Redis, PostgreSQL, Docker are impossible.", "default": "Python + FastAPI + SQLite (single-process, pip-installable, no Docker)."},
+    {"id": 2, "expert_name": "Build Feasibility Engineer", "question": "What external dependencies are needed and are they all pip/npm installable?", "why": "Any system-level dependency will break the autonomous build.", "default": "All deps via pip. No system packages, no Docker, no external databases."},
+    {"id": 3, "expert_name": "Build Feasibility Engineer", "question": "What scope limitations should we set so Claude Code can finish in one session?", "why": "Overly ambitious PRDs result in half-built projects.", "default": "MVP only: 3-5 endpoints or pages, no auth for v1, no CI/CD."},
+    {"id": 4, "expert_name": "Stack Specialist", "question": "What framework best fits this project's requirements?", "why": "Framework choice affects build speed, maintainability, and scope.", "default": "FastAPI for APIs, Flask for web apps, vanilla HTML/CSS/JS for landing pages."},
+    {"id": 5, "expert_name": "Stack Specialist", "question": "What is the expected data volume and storage approach?", "why": "Determines if SQLite is sufficient or if we need creative alternatives.", "default": "MVP: <1000 users, <100K records. SQLite is sufficient."},
+    {"id": 6, "expert_name": "Security & Performance Engineer", "question": "What authentication and authorization model is needed?", "why": "Auth affects every endpoint and must be designed upfront.", "default": "JWT tokens for API auth. No auth for MVP landing pages."},
+    {"id": 7, "expert_name": "Security & Performance Engineer", "question": "What are the input validation and size limits?", "why": "Without limits, someone uploads 1GB in a text field.", "default": "Title: max 255 chars. Content: max 50KB. Body: max 100KB."},
+]
 
 
 # ── Technical expert guard ──────────────────────────────────────────
@@ -536,15 +582,15 @@ def _print_header(prd_title, experts, assessment):
     print()
 
 
-def _ask_question(q, experts, prd_summary, research_log=None):
+def _ask_question(q, experts, prd_summary, research_log=None, total=8):
     """Present a question and get user response. Returns (answer, tag).
 
     *research_log*, when provided, accumulates ``{"topic": ..., "findings": ...}``
     dicts for every successful research call made during this question.
+    *total* is the total number of questions in this round (for display).
     """
     expert = q["expert_name"]
     qid = q["id"]
-    total = 8
     color = _get_expert_color(expert, experts)
     question = q["question"]
     why = q["why"]
@@ -900,13 +946,15 @@ def _interactive_prd_edit(prd_text: str) -> str:
                 print(f"  {line}")
 
 
-def _save_transcript(experts, questions, qa_transcript, enriched_prd, research_log=None):
-    """Save full transcript to .forja/plan-transcript.json."""
+def _save_transcript(round_data, enriched_prd, research_log=None):
+    """Save full transcript to .forja/plan-transcript.json.
+
+    *round_data* is a list of dicts, one per round, each containing:
+    ``{"round": str, "experts": list, "questions": list, "answers": list}``.
+    """
     transcript = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "experts": experts,
-        "questions": questions,
-        "answers": qa_transcript,
+        "rounds": round_data,
         "research": research_log or [],
         "enriched_prd_length": len(enriched_prd) if enriched_prd else 0,
     }
@@ -920,62 +968,31 @@ def _save_transcript(experts, questions, qa_transcript, enriched_prd, research_l
     return out_path
 
 
-# ── Main entry point ────────────────────────────────────────────────
+# ── Expert Q&A helper ────────────────────────────────────────────────
 
-def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
-    """Run Forja plan mode interactively.
+def _run_expert_qa(
+    prompt_template: str,
+    fallback_experts: list[dict],
+    fallback_questions: list[dict],
+    prd_content: str,
+    prd_title: str,
+    context: str,
+    skill_guidance: str,
+    round_label: str,
+    max_questions: int = 8,
+    ensure_tech: bool = False,
+    ensure_design: bool = False,
+) -> tuple[list[dict], list[dict], list[dict], list[dict], str]:
+    """Run one round of expert panel Q&A.
 
-    Returns True if the PRD was saved successfully, False otherwise.
-    When *_called_from_runner* is True, skips messages that tell the
-    user to run additional commands (since the runner continues
-    automatically).
+    Returns ``(experts, questions, qa_transcript, research_log, assessment)``.
     """
-    prd_file = Path(prd_path) if prd_path else PRD_PATH
-
-    # Check if PRD is missing or empty/placeholder → scratch flow
-    prd_missing = not prd_file.exists()
-    prd_empty = False
-    if not prd_missing:
-        content = prd_file.read_text(encoding="utf-8").strip()
-        # Detect empty or default init template
-        prd_empty = not content or content in (
-            "# PRD\n\nDescribe your project here.",
-            "# PRD\nDescribe your project here.",
-        )
-
-    if prd_missing or prd_empty:
-        load_dotenv()
-        existing_context = _read_existing_context()
-        prd_content, continue_to_panel = _scratch_flow(existing_context)
-        if not prd_content:
-            return False
-        if not continue_to_panel:
-            # PRD was saved but user skipped expert review.
-            # If called from runner, it will continue to build with this PRD.
-            return True
-        # prd_content is set, prd_file was written by _scratch_flow()
-    else:
-        prd_content = prd_file.read_text(encoding="utf-8").strip()
-
-    # Extract title
-    prd_lines = prd_content.split("\n")
-    prd_title = prd_lines[0].lstrip("# ").strip() if prd_lines else "Unknown"
-    # Short summary for research calls
     prd_summary = prd_content[:500]
 
-    # Load env
-    load_dotenv()
-
-    # Gather context
-    context = _gather_context()
-
-    # ── Step 1: Get expert panel from Kimi ──
-    skill = _detect_skill()
-    skill_guidance = SKILL_EXPERT_GUIDANCE.get(skill, SKILL_EXPERT_GUIDANCE["custom"])
-    print(f"\n  {DIM}Assembling expert panel...{RESET}")
+    print(f"\n  {DIM}Assembling {round_label} expert panel...{RESET}")
 
     raw = call_llm(
-        f"{EXPERT_PANEL_PROMPT}\n\n"
+        f"{prompt_template}\n\n"
         f"IMPORTANT CONTEXT:\n{skill_guidance}\n\n"
         f"PRD:\n{prd_content}\n\n"
         f"Available context:\n{context}",
@@ -993,47 +1010,44 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         or len(panel["experts"]) < 2
         or len(panel["questions"]) < 3
     ):
-        print(f"  {DIM}Using generic expert panel{RESET}")
-        experts = FALLBACK_EXPERTS
-        questions = FALLBACK_QUESTIONS
+        print(f"  {DIM}Using generic {round_label} panel{RESET}")
+        experts = list(fallback_experts)
+        questions = list(fallback_questions)
         assessment = "PRD needs clarification before building."
     else:
         experts = panel["experts"][:3]
-        questions = panel["questions"][:8]
+        questions = panel["questions"][:max_questions]
         assessment = panel.get("initial_assessment", "")
 
-    # Guarantee a technical / build-feasibility expert is present
-    experts, questions = _ensure_technical_expert(experts, questions)
-
-    # Add a design expert when the project has a UI
-    experts = _ensure_design_expert(experts, prd_content)
+    if ensure_tech:
+        experts, questions = _ensure_technical_expert(experts, questions)
+    if ensure_design:
+        experts = _ensure_design_expert(experts, prd_content)
 
     # Ensure each question has an id
     for i, q in enumerate(questions):
         if "id" not in q:
             q["id"] = i + 1
 
-    # ── Step 2: Print header ──
+    total = len(questions)
+
     _print_header(prd_title, experts, assessment)
 
-    # ── Step 3: Interactive Q&A ──
-    qa_transcript = []
+    qa_transcript: list[dict] = []
     research_log: list[dict] = []
     print(f"  {DIM}Enter=accept default | skip | research [topic] to investigate | done to finish{RESET}")
     print()
 
     for q in questions:
-        answer, tag = _ask_question(q, experts, prd_summary, research_log)
+        answer, tag = _ask_question(q, experts, prd_summary, research_log, total=total)
 
         if tag == "DONE":
-            # Fill remaining with defaults
             qa_transcript.append({
                 "expert": q["expert_name"],
                 "question": q["question"],
                 "answer": q["default"],
                 "tag": "ASSUMPTION",
             })
-            # Fill the rest
             remaining_qs = questions[questions.index(q) + 1:]
             for rq in remaining_qs:
                 qa_transcript.append({
@@ -1053,46 +1067,229 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         })
         print()
 
-    # ── Step 4: Count tags ──
+    # Summary
     facts = sum(1 for a in qa_transcript if a["tag"] == "FACT")
     decisions = sum(1 for a in qa_transcript if a["tag"] == "DECISION")
     assumptions = sum(1 for a in qa_transcript if a["tag"] == "ASSUMPTION")
-
     print()
-    print(f"  {BOLD}Summary:{RESET} {GREEN}{facts} facts{RESET}, "
+    print(f"  {BOLD}{round_label} Summary:{RESET} {GREEN}{facts} facts{RESET}, "
           f"{CYAN}{decisions} decisions{RESET}, "
           f"{YELLOW}{assumptions} assumptions{RESET}")
 
-    # ── Step 4b: Design Context (optional) ──
+    return experts, questions, qa_transcript, research_log, assessment
+
+
+def _get_skill_what_guidance(skill: str) -> str:
+    """Get skill-specific guidance for WHAT round."""
+    if skill == "landing-page":
+        return (
+            "Focus WHAT questions on: copy and messaging, page sections and flow, "
+            "CTA strategy, audience targeting, visual hierarchy, tone of voice. "
+            "Do NOT ask about databases, APIs, or deployment."
+        )
+    if skill == "api-backend":
+        return (
+            "Focus WHAT questions on: API design and endpoints, data model, "
+            "business rules, user flows, input/output contracts. "
+            "Do NOT ask about visual design, CSS, or frontend layout."
+        )
+    return ""
+
+
+def _get_skill_how_guidance(skill: str) -> str:
+    """Get skill-specific guidance for HOW round."""
+    if skill == "landing-page":
+        return (
+            "Focus HOW questions on: HTML/CSS framework, build tooling, "
+            "hosting constraints, asset pipeline, responsive strategy. "
+            "Keep it simple — vanilla HTML/CSS/JS is preferred."
+        )
+    if skill == "api-backend":
+        return (
+            "Focus HOW questions on: framework choice (FastAPI/Flask), "
+            "database (SQLite only), auth mechanism, error handling, "
+            "deployment (uvicorn). All deps must be pip-installable."
+        )
+    return ""
+
+
+# ── Main entry point ────────────────────────────────────────────────
+
+def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
+    """Run Forja plan mode interactively with two expert rounds.
+
+    Round 1 (WHAT): Product/Strategy experts decide what to build.
+    Round 2 (HOW): Technical experts decide how to build it.
+
+    Returns True if the PRD was saved successfully, False otherwise.
+    When *_called_from_runner* is True, skips messages that tell the
+    user to run additional commands (since the runner continues
+    automatically).
+    """
+    prd_file = Path(prd_path) if prd_path else PRD_PATH
+
+    # Check if PRD is missing or empty/placeholder → scratch flow
+    prd_missing = not prd_file.exists()
+    prd_empty = False
+    if not prd_missing:
+        content = prd_file.read_text(encoding="utf-8").strip()
+        prd_empty = not content or content in (
+            "# PRD\n\nDescribe your project here.",
+            "# PRD\nDescribe your project here.",
+        )
+
+    if prd_missing or prd_empty:
+        load_dotenv()
+        existing_context = _read_existing_context()
+        prd_content, continue_to_panel = _scratch_flow(existing_context)
+        if not prd_content:
+            return False
+        if not continue_to_panel:
+            return True
+        # prd_content is set, prd_file was written by _scratch_flow()
+    else:
+        prd_content = prd_file.read_text(encoding="utf-8").strip()
+
+    # Extract title
+    prd_lines = prd_content.split("\n")
+    prd_title = prd_lines[0].lstrip("# ").strip() if prd_lines else "Unknown"
+
+    # Load env
+    load_dotenv()
+
+    # Gather context
+    context = _gather_context()
+
+    # Detect skill for round-specific guidance
+    skill = _detect_skill()
+    base_guidance = SKILL_EXPERT_GUIDANCE.get(skill, SKILL_EXPERT_GUIDANCE["custom"])
+
+    round_data: list[dict] = []
+    all_research: list[dict] = []
+
+    # ════════════════════════════════════════════════════════════════
+    #  ROUND 1 — WHAT (Product / Strategy)
+    # ════════════════════════════════════════════════════════════════
+    print(f"\n{BOLD}  ═══ Round 1: WHAT to build ═══{RESET}")
+
+    what_guidance = base_guidance + "\n" + _get_skill_what_guidance(skill)
+
+    what_experts, what_qs, what_transcript, what_research, _ = _run_expert_qa(
+        prompt_template=WHAT_PANEL_PROMPT,
+        fallback_experts=FALLBACK_WHAT_EXPERTS,
+        fallback_questions=FALLBACK_WHAT_QUESTIONS,
+        prd_content=prd_content,
+        prd_title=prd_title,
+        context=context,
+        skill_guidance=what_guidance,
+        round_label="WHAT",
+        max_questions=6,
+        ensure_tech=False,
+        ensure_design=True,
+    )
+
+    round_data.append({
+        "round": "WHAT",
+        "experts": what_experts,
+        "questions": what_qs,
+        "answers": what_transcript,
+    })
+    all_research.extend(what_research)
+
+    # ── Generate intermediate PRD with WHAT decisions ──
+    print(f"\n  {DIM}Incorporating product decisions into PRD...{RESET}")
+
+    what_enriched = _generate_enriched_prd(
+        prd_content, what_transcript, what_experts,
+    )
+    if not what_enriched:
+        # Manual fallback
+        what_enriched = prd_content + "\n\n## Product Decisions\n\n"
+        for a in what_transcript:
+            what_enriched += f"- [{a['tag']}] {a['question']}: {a['answer']}\n"
+
+    # ── User can edit between rounds ──
+    print()
+    print(f"  {BOLD}── PRD after Round 1 (preview) ──{RESET}")
+    print()
+    preview_lines = what_enriched.strip().splitlines()
+    for line in preview_lines[:40]:
+        print(f"  {line}")
+    if len(preview_lines) > 40:
+        print(f"  {DIM}... ({len(preview_lines) - 40} more lines){RESET}")
+    print()
+
+    what_enriched = _interactive_prd_edit(what_enriched)
+
+    # ════════════════════════════════════════════════════════════════
+    #  ROUND 2 — HOW (Technical / Feasibility)
+    # ════════════════════════════════════════════════════════════════
+    print(f"\n{BOLD}  ═══ Round 2: HOW to build it ═══{RESET}")
+
+    how_guidance = base_guidance + "\n" + _get_skill_how_guidance(skill)
+
+    how_experts, how_qs, how_transcript, how_research, _ = _run_expert_qa(
+        prompt_template=HOW_PANEL_PROMPT,
+        fallback_experts=FALLBACK_HOW_EXPERTS,
+        fallback_questions=FALLBACK_HOW_QUESTIONS,
+        prd_content=what_enriched,
+        prd_title=prd_title,
+        context=context,
+        skill_guidance=how_guidance,
+        round_label="HOW",
+        max_questions=7,
+        ensure_tech=True,
+        ensure_design=False,
+    )
+
+    round_data.append({
+        "round": "HOW",
+        "experts": how_experts,
+        "questions": how_qs,
+        "answers": how_transcript,
+    })
+    all_research.extend(how_research)
+
+    # ── Design Context (optional) ──
     design_context = _collect_design_context()
 
-    # ── Step 5: Generate enriched PRD ──
-    print(f"\n  {DIM}Generating enriched PRD...{RESET}")
+    # ── Generate final enriched PRD with both rounds ──
+    all_transcript = what_transcript + how_transcript
+    all_experts = what_experts + how_experts
+    # Deduplicate experts by name
+    seen_names: set[str] = set()
+    unique_experts: list[dict] = []
+    for e in all_experts:
+        if e["name"] not in seen_names:
+            seen_names.add(e["name"])
+            unique_experts.append(e)
+
+    print(f"\n  {DIM}Generating final enriched PRD...{RESET}")
 
     enriched_prd = _generate_enriched_prd(
-        prd_content, qa_transcript, experts, design_context, research_log,
+        what_enriched, how_transcript, unique_experts, design_context, all_research,
     )
 
     if not enriched_prd:
         # Fallback: manual assembly
-        print(f"  {YELLOW}Kimi did not respond. Generating PRD manually.{RESET}")
-        enriched_prd = prd_content + "\n"
+        assumptions = sum(1 for a in all_transcript if a["tag"] == "ASSUMPTION")
+        print(f"  {YELLOW}LLM did not respond. Generating PRD manually.{RESET}")
+        enriched_prd = what_enriched + "\n"
         enriched_prd += "\n## Technical Decisions\n\n"
-        for a in qa_transcript:
+        for a in how_transcript:
             enriched_prd += f"- [{a['tag']}] {a['question']}: {a['answer']}\n"
-        enriched_prd += f"\n## Assumption Density: {assumptions}/{len(qa_transcript)}\n"
+        enriched_prd += f"\n## Assumption Density: {assumptions}/{len(all_transcript)}\n"
         if design_context:
             enriched_prd += f"\n## Design System\n\n{design_context}\n"
-        if research_log:
+        if all_research:
             enriched_prd += "\n## Research Findings\n\n"
-            for r in research_log:
+            for r in all_research:
                 enriched_prd += f"### {r['topic']}\n{r['findings']}\n\n"
 
-    # ── Step 6: Preview ──
+    # ── Final preview ──
     print()
-    print(f"  {BOLD}── Enriched PRD (preview) ──{RESET}")
+    print(f"  {BOLD}── Final Enriched PRD (preview) ──{RESET}")
     print()
-    # Show first 60 lines
     preview_lines = enriched_prd.strip().splitlines()
     for line in preview_lines[:60]:
         print(f"  {line}")
@@ -1100,13 +1297,13 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         print(f"  {DIM}... ({len(preview_lines) - 60} more lines){RESET}")
     print()
 
-    # ── Step 7: Interactive edit / confirm ──
+    # ── Final interactive edit / confirm ──
     enriched_prd = _interactive_prd_edit(enriched_prd)
     prd_file.write_text(enriched_prd + "\n", encoding="utf-8")
     print(f"\n  {GREEN}✔ PRD saved to {prd_file}{RESET}")
 
-    # ── Step 8: Save transcript ──
-    transcript_path = _save_transcript(experts, questions, qa_transcript, enriched_prd, research_log)
+    # ── Save transcript (both rounds) ──
+    transcript_path = _save_transcript(round_data, enriched_prd, all_research)
     print(f"  {DIM}Transcript: {transcript_path}{RESET}")
 
     if not _called_from_runner:

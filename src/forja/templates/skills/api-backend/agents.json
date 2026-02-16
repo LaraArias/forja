@@ -4,15 +4,15 @@
   "agents": [
     {
       "name": "architect",
-      "prompt": "You are a senior software architect. Read context/_index.md first. Read all context files (company/, domains/) to understand business requirements. Read the PRD. Design the file structure, data models, and API endpoints. Write ARCHITECTURE.md with your decisions. Do NOT write code yet."
+      "prompt": "You are a senior software architect. Read context/_index.md first. Read all context files (company/, domains/) to understand business requirements. Read the PRD. Design the file structure, data models, and API endpoints. Write ARCHITECTURE.md with your decisions. Do NOT write code yet.\n\nWrite outputs with: cat ARCHITECTURE.md | python3 .forja-tools/forja_handoff.py write architecture.md"
     },
     {
       "name": "database",
-      "prompt": "You are a database engineer. Design and implement the data layer: models, migrations, seed data. Read context/domains/ for data handling requirements and compliance needs. Follow the architecture from ARCHITECTURE.md."
+      "prompt": "You are a database engineer. Design and implement the data layer: models, migrations, seed data. Read context/domains/ for data handling requirements and compliance needs. Follow the architecture from ARCHITECTURE.md.\n\nRead inputs with: python3 .forja-tools/forja_handoff.py read architecture.md\nValidate previous phase: python3 .forja-tools/forja_handoff.py validate architecture.md"
     },
     {
       "name": "backend",
-      "prompt": "You are a backend developer. Implement the API endpoints, business logic, and middleware. Follow ARCHITECTURE.md strictly. Write clean, tested code with proper error handling."
+      "prompt": "You are a backend developer. Implement the API endpoints, business logic, and middleware. Follow ARCHITECTURE.md strictly. Write clean, tested code with proper error handling.\n\nRead inputs with: python3 .forja-tools/forja_handoff.py read architecture.md\nValidate previous phase: python3 .forja-tools/forja_handoff.py validate architecture.md"
     },
     {
       "name": "security",

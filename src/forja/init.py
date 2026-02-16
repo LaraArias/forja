@@ -43,6 +43,7 @@ TEMPLATES = [
     ("forja_outcome.py", ".forja-tools/forja_outcome.py"),
     ("forja_learnings.py", ".forja-tools/forja_learnings.py"),
     ("forja_qa_playwright.py", ".forja-tools/forja_qa_playwright.py"),
+    ("forja_handoff.py", ".forja-tools/forja_handoff.py"),
     ("forja.toml.default", "forja.toml"),
 ]
 
@@ -195,7 +196,7 @@ def _copy_templates(target: Path, overwrite: bool = False) -> None:
     # Create .gitignore if it doesn't exist
     gitignore = target / ".gitignore"
     if not gitignore.exists():
-        gitignore.write_text(".env\n.forja/\n__pycache__/\n*.pyc\n", encoding="utf-8")
+        gitignore.write_text(".env\n.forja/\n__pycache__/\n*.pyc\nartifacts/\n", encoding="utf-8")
         print("  CREATE   .gitignore")
 
 
@@ -288,15 +289,28 @@ def _ask_skill() -> str | None:
 
 
 def _copy_skill(target: Path, skill_name: str) -> None:
-    """Copy skill agents.json to the project."""
-    src = resources.files("forja") / "templates" / "skills" / skill_name / "agents.json"
-    dest = target / FORJA_TOOLS / "skill.json"
+    """Copy skill agents.json and workflow.json to the project."""
+    skill_dir = resources.files("forja") / "templates" / "skills" / skill_name
+    dest_dir = target / FORJA_TOOLS
+
+    # Copy agents.json → skill.json
     try:
-        content = src.read_text(encoding="utf-8")
-        dest.write_text(content, encoding="utf-8")
+        agents_src = skill_dir / "agents.json"
+        content = agents_src.read_text(encoding="utf-8")
+        (dest_dir / "skill.json").write_text(content, encoding="utf-8")
         print(f"  {PASS_ICON} Skill '{skill_name}' configured")
     except (OSError, TypeError):
         print(f"  {WARN_ICON} Skill template not found: {skill_name}")
+        return
+
+    # Copy workflow.json if it exists
+    try:
+        workflow_src = skill_dir / "workflow.json"
+        content = workflow_src.read_text(encoding="utf-8")
+        (dest_dir / "workflow.json").write_text(content, encoding="utf-8")
+        print(f"  {PASS_ICON} Workflow pipeline configured")
+    except (OSError, TypeError):
+        pass  # workflow.json is optional
 
 
 # ── Main entry point ─────────────────────────────────────────────────
@@ -360,6 +374,8 @@ def run_init(directory: str = ".", force: bool = False, upgrade: bool = False) -
     skill_name = _ask_skill()
     if skill_name:
         _copy_skill(target, skill_name)
+        # Create artifacts/ for inter-agent handoffs
+        (target / "artifacts").mkdir(exist_ok=True)
 
     # Step 6: Interactive context setup
     interactive_context_setup(target, skill_name)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from forja.constants import CLAUDE_MD, FORJA_TOOLS, TEAMMATES_DIR
+from forja.constants import CLAUDE_MD, FORJA_TOOLS, TEAMMATES_DIR, WORKFLOW_PATH
 from forja.utils import FAIL_ICON, PASS_ICON, WARN_ICON, Feature, read_feature_status
 
 
@@ -41,10 +41,85 @@ def _load_features_safe(path: Path) -> tuple[str, list[dict]]:
         return "reading", []
 
 
+def _load_workflow():
+    """Load workflow.json if it exists. Returns (phases_list, agent_order_dict) or (None, None)."""
+    if not WORKFLOW_PATH.exists():
+        return None, None
+    try:
+        data = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
+        phases = data.get("phases", [])
+        if not phases:
+            return None, None
+        # Map agent name -> phase order (1-based)
+        order = {}
+        for i, phase in enumerate(phases):
+            order[phase.get("agent", "")] = i + 1
+        return phases, order
+    except (json.JSONDecodeError, OSError):
+        return None, None
+
+
+def _show_workflow_status(phases, order) -> bool:
+    """Show status with workflow phase ordering."""
+    teammates_dir = TEAMMATES_DIR
+
+    print("Forja Status (workflow mode)")
+    print("============================\n")
+
+    total = 0
+    passed = 0
+
+    for phase in phases:
+        agent_name = phase.get("agent", "?")
+        phase_num = order.get(agent_name, 0)
+        output = phase.get("output", "")
+        role = phase.get("role", agent_name)
+
+        features_path = teammates_dir / agent_name / "features.json"
+        file_status, features = _load_features_safe(features_path)
+
+        # Determine phase status from features
+        if file_status != "ok" or not features:
+            icon = "\u25cb"  # ○ waiting
+            label = "(waiting)"
+        else:
+            feat = Feature.from_dict(features[0])
+            total += 1
+            if feat.status == "passed":
+                passed += 1
+                icon = "\u2714"  # ✔
+                label = f"({output})" if output else ""
+            elif feat.status == "blocked":
+                icon = "\u26a0"  # ⚠
+                label = "(blocked)"
+            elif feat.cycles > 0:
+                icon = "\u23f3"  # ⏳
+                label = f"({output})" if output else "(in progress)"
+            else:
+                icon = "\u25cb"  # ○
+                label = "(waiting)"
+
+        print(f"  Phase {phase_num}: {agent_name} {icon} {label}")
+
+    print()
+    if total > 0:
+        pct = int(passed / total * 100)
+        print(f"  Progress: {passed}/{total} phases complete ({pct}%)")
+    else:
+        print("  Progress: phases not started")
+
+    return True
+
+
 def show_status() -> bool:
     """Main status entrypoint."""
     if not _check_project():
         return False
+
+    # Check for workflow mode first
+    phases, order = _load_workflow()
+    if phases is not None:
+        return _show_workflow_status(phases, order)
 
     teammates_dir = TEAMMATES_DIR
 

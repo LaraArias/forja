@@ -1,0 +1,48 @@
+{
+  "name": "landing-page",
+  "description": "Marketing landing page pipeline",
+  "execution": "sequential",
+  "phases": [
+    {
+      "agent": "content-strategist",
+      "role": "Content Strategist",
+      "input": ["context/prd.md", "context/company/", "context/domains/"],
+      "output": "artifacts/copy-brief.md",
+      "prompt": "You are the Content Strategist. Read the PRD and business context. Write a copy brief with: headline options (3), subheadline, section-by-section copy, CTA text, tone guidelines. Output to artifacts/copy-brief.md. Do NOT write any HTML/CSS/JS.",
+      "validation": "copy-brief.md exists and has content for each PRD section"
+    },
+    {
+      "agent": "design-planner",
+      "role": "Design Planner",
+      "input": ["artifacts/copy-brief.md", "context/design-system/"],
+      "output": "artifacts/design-spec.md",
+      "prompt": "You are the Design Planner. Read the copy brief and design system. Create a design spec with: layout wireframe (text-based), spacing system, color usage per section, typography hierarchy, responsive breakpoints, animation plan. Output to artifacts/design-spec.md. Do NOT write any code.",
+      "validation": "design-spec.md exists with layout and spacing defined"
+    },
+    {
+      "agent": "frontend-builder",
+      "role": "Frontend Developer",
+      "input": ["artifacts/copy-brief.md", "artifacts/design-spec.md", "context/design-system/"],
+      "output": "index.html",
+      "prompt": "You are the Frontend Developer. Read the copy brief and design spec. Build a single index.html file with inline CSS and JS. Follow the design spec EXACTLY for layout, spacing, colors, and typography. Use the copy from copy-brief.md EXACTLY. Do NOT change any copy text. Do NOT invent sections not in the brief.",
+      "validation": "index.html exists, valid HTML, contains all sections from copy-brief"
+    },
+    {
+      "agent": "seo-optimizer",
+      "role": "SEO Specialist",
+      "input": ["index.html", "artifacts/copy-brief.md"],
+      "output": "index.html",
+      "prompt": "You are the SEO Specialist. Read index.html and optimize: add meta tags (title, description, og:image, twitter:card), add structured data (JSON-LD), verify heading hierarchy (single h1), add alt text to images, ensure semantic HTML (header, main, section, footer). Do NOT change the visual design or copy.",
+      "validation": "index.html has meta tags, structured data, semantic HTML"
+    },
+    {
+      "agent": "qa",
+      "role": "QA Engineer",
+      "input": ["index.html", "artifacts/copy-brief.md", "artifacts/design-spec.md"],
+      "output": ".forja/qa-report.json",
+      "prompt": "You are QA. Start a local server: python3 -m http.server 8080. Run Playwright tests: page loads (200), all sections from copy-brief exist, responsive at 1280px and 375px (no horizontal scroll), no console errors, all links work, screenshots to .forja/screenshots/. Use python3 .forja-tools/forja_qa_playwright.py if available. Report results to .forja/qa-report.json.",
+      "tool": "playwright",
+      "validation": "qa-report.json exists with test results"
+    }
+  ]
+}

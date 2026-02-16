@@ -95,3 +95,82 @@ class TestShowStatus:
     def test_not_forja_project(self, mock_check):
         result = show_status()
         assert result is False
+
+
+class TestWorkflowStatus:
+    """Verify status shows phases in order when workflow.json exists."""
+
+    def test_status_shows_phases_in_order(self, tmp_path, capsys, monkeypatch):
+        """Workflow mode shows 'Phase N: agent' with status icons."""
+        from forja.status import show_status
+
+        # Create workflow.json
+        workflow = {
+            "phases": [
+                {"agent": "content-strategist", "role": "Content", "output": "copy-brief.md"},
+                {"agent": "frontend-builder", "role": "Frontend", "output": "index.html"},
+                {"agent": "qa", "role": "QA", "output": "qa-report.json"},
+            ]
+        }
+
+        teammates = tmp_path / "teammates"
+        teammates.mkdir()
+
+        # content-strategist: passed
+        cs = teammates / "content-strategist"
+        cs.mkdir()
+        (cs / "features.json").write_text(json.dumps({
+            "features": [{"id": "content-strategist-001", "description": "Generate copy",
+                          "status": "passed", "cycles": 1}]
+        }), encoding="utf-8")
+
+        # frontend-builder: in progress
+        fb = teammates / "frontend-builder"
+        fb.mkdir()
+        (fb / "features.json").write_text(json.dumps({
+            "features": [{"id": "frontend-builder-001", "description": "Build HTML",
+                          "status": "pending", "cycles": 1}]
+        }), encoding="utf-8")
+
+        wf_path = tmp_path / "workflow.json"
+        wf_path.write_text(json.dumps(workflow), encoding="utf-8")
+
+        monkeypatch.setattr("forja.status.TEAMMATES_DIR", teammates)
+        monkeypatch.setattr("forja.status.WORKFLOW_PATH", wf_path)
+        monkeypatch.setattr("forja.status._check_project", lambda: True)
+
+        result = show_status()
+
+        assert result is True
+        output = capsys.readouterr().out
+        assert "workflow mode" in output
+        assert "Phase 1" in output
+        assert "Phase 2" in output
+        assert "content-strategist" in output
+
+    def test_no_workflow_uses_epic_mode(self, tmp_path, capsys, monkeypatch):
+        """Without workflow.json, status falls back to classic epic mode."""
+        from forja.status import show_status
+
+        teammates = tmp_path / "teammates"
+        teammates.mkdir()
+        t1 = teammates / "backend"
+        t1.mkdir()
+        (t1 / "features.json").write_text(json.dumps({
+            "features": [
+                {"id": "b-001", "description": "Auth", "status": "passed", "cycles": 1},
+            ]
+        }), encoding="utf-8")
+
+        # No workflow.json → classic mode
+        monkeypatch.setattr("forja.status.TEAMMATES_DIR", teammates)
+        monkeypatch.setattr("forja.status.WORKFLOW_PATH", tmp_path / "nonexistent.json")
+        monkeypatch.setattr("forja.status._check_project", lambda: True)
+
+        result = show_status()
+
+        assert result is True
+        output = capsys.readouterr().out
+        assert "Forja Status" in output
+        assert "workflow mode" not in output
+        assert "Auth" in output
