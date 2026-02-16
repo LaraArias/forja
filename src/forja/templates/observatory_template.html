@@ -30,6 +30,7 @@ h1 { font-size:1.8rem; margin-bottom:4px;
   padding:16px 20px; flex:1; min-width:180px; position:relative; overflow:hidden; }
 .pipe-card::before { content:''; position:absolute; top:0; left:0; right:0; height:3px; }
 .pipe-card.s-pass::before { background:var(--success); }
+.pipe-card.s-warn::before { background:var(--warning); }
 .pipe-card.s-fail::before { background:var(--error); }
 .pipe-card.s-skip::before { background:var(--border); }
 .pipe-card .pipe-name { font-size:.75rem; color:var(--dim); margin-bottom:6px;
@@ -37,6 +38,7 @@ h1 { font-size:1.8rem; margin-bottom:4px;
 .pipe-card .pipe-badge { display:inline-block; font-size:.65rem; font-weight:700;
   padding:2px 8px; border-radius:4px; margin-bottom:6px; text-transform:uppercase; }
 .badge-pass { background:rgba(34,197,94,.15); color:var(--success); }
+.badge-warn { background:rgba(234,179,8,.15); color:var(--warning); }
 .badge-fail { background:rgba(239,68,68,.15); color:var(--error); }
 .badge-skip { background:rgba(148,163,184,.1); color:var(--dim); }
 .pipe-card .pipe-detail { font-size:.85rem; color:var(--text); }
@@ -93,11 +95,15 @@ td { padding:8px; border-bottom:1px solid var(--border); }
 .progress-label { font-size:.8rem; color:var(--dim); margin-top:4px; }
 
 /* Requirement lists */
-.req-cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:12px; }
+.req-cols { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-top:12px; }
 .req-list { list-style:none; padding:0; }
 .req-list li { padding:5px 0; font-size:.82rem; display:flex; align-items:flex-start; gap:6px; }
 .req-list .icon-met { color:var(--success); flex-shrink:0; }
 .req-list .icon-unmet { color:var(--error); flex-shrink:0; }
+.req-list .icon-deferred { color:var(--blue); flex-shrink:0; }
+
+/* Product backlog badge */
+.sev-product { background:rgba(96,165,250,.15); color:var(--blue); }
 
 /* Assumption density bar */
 .density-bar { display:flex; height:28px; border-radius:6px; overflow:hidden; margin:8px 0; }
@@ -162,9 +168,9 @@ const D = /*DATA_JSON*/null;
 // ── Helpers ──
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/\\x3c/g,'&lt;').replace(/>/g,'&gt;');
 const sevClass = s => ({high:'sev-high',medium:'sev-medium',low:'sev-low'})[String(s).toLowerCase()]||'sev-low';
-const badgeCls = s => s==='pass'?'badge-pass':s==='fail'?'badge-fail':'badge-skip';
-const cardCls = s => s==='pass'?'s-pass':s==='fail'?'s-fail':'s-skip';
-const badgeText = s => s==='pass'?'PASS':s==='fail'?'FAIL':'SKIPPED';
+const badgeCls = s => s==='pass'?'badge-pass':s==='warn'?'badge-warn':s==='fail'?'badge-fail':'badge-skip';
+const cardCls = s => s==='pass'?'s-pass':s==='warn'?'s-warn':s==='fail'?'s-fail':'s-skip';
+const badgeText = s => s==='pass'?'PASS':s==='warn'?'WARN':s==='fail'?'FAIL':'SKIPPED';
 const fmtTime = m => m>=60?Math.floor(m/60)+'h '+(m%60)+'m':m+'m';
 const pctColor = p => p>=80?'var(--success)':p>=60?'var(--warning)':'var(--error)';
 const cycleColor = c => c<=1?'#22c55e':c<=2?'#eab308':'#ef4444';
@@ -212,7 +218,7 @@ function buildPipeline() {
     const oc = D.outcome_coverage;
     html += `<div style="max-width:600px;margin:0 0 20px;">
       <div class="progress-track"><div class="progress-fill" style="width:${oc}%;background:${pctColor(oc)}"></div></div>
-      <div class="progress-label">${oc}% outcome coverage &mdash; ${D.outcome_met.length} met, ${D.outcome_unmet.length} unmet</div>
+      <div class="progress-label">${oc}% outcome coverage &mdash; ${D.outcome_met.length} met, ${D.outcome_unmet.length} unmet${D.outcome_deferred&&D.outcome_deferred.length>0?', '+D.outcome_deferred.length+' deferred':''}</div>
     </div>`;
   }
   html += '</div>';
@@ -297,6 +303,14 @@ function buildValidation() {
       html += `<li><span class="icon-unmet">&#10007;</span>${esc(r)}</li>`;
     }
     html += '</ul></div>';
+    // Deferred (business decisions, not buildable by code)
+    if (D.outcome_deferred && D.outcome_deferred.length > 0) {
+      html += '<div><h3 style="color:var(--warning);font-size:.85rem;margin-bottom:8px">Deferred (Business)</h3><ul class="req-list">';
+      for (const r of D.outcome_deferred.slice(0,15)) {
+        html += `<li><span style="color:var(--warning);flex-shrink:0">&#9679;</span>${esc(r)}</li>`;
+      }
+      html += '</ul></div>';
+    }
     html += '</div>';
   }
   html += '</div></div></div>';

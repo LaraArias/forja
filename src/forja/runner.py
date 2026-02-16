@@ -721,6 +721,35 @@ def _run_learnings_extract():
         print(f"  {DIM}extraction complete{RESET}")
 
 
+# ── Phase 5b: Apply Learnings to Context ──────────────────────────────
+
+def _run_learnings_apply():
+    """Apply extracted learnings to context files. Informational, never blocks."""
+    learnings_script = FORJA_TOOLS / "forja_learnings.py"
+    if not learnings_script.exists():
+        return
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(learnings_script), "apply"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  {YELLOW}Warning: learnings apply timed out after 30s, continuing{RESET}")
+        return
+
+    output = result.stdout.strip()
+    if "Applied" in output:
+        for line in output.splitlines():
+            if "Applied" in line:
+                print(f"  {line.strip()}")
+                return
+    elif output:
+        print(f"  {DIM}{output.splitlines()[-1].strip()}{RESET}")
+
+
 # ── Phase 6: Observatory ─────────────────────────────────────────────
 
 def _run_observatory():
@@ -1018,6 +1047,7 @@ def _run_forja_inner(prd_path: str | None = None) -> bool:
     # ── Phase 5: Extract Learnings (informational) ──
     _phase_header(5, "Extract Learnings", 6)
     _run_learnings_extract()
+    _run_learnings_apply()
 
     # ── Phase 6: Observatory (informational) ──
     _phase_header(6, "Observatory Report", 6)

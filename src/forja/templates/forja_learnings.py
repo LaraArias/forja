@@ -31,6 +31,7 @@ VALID_CATEGORIES = [
     "spec-gap",
     "assumption",
     "unmet-requirement",
+    "product-backlog",
 ]
 
 MANIFEST_MAX_CHARS = 2000
@@ -343,12 +344,44 @@ def cmd_extract():
         except (json.JSONDecodeError, OSError):
             pass
 
-    # ── 4. outcome-report.json → unmet requirements → "unmet-requirement" ──
+    # ── 4. outcome-report.json → unmet + deferred requirements ──
     outcome_path = Path(".forja") / "outcome-report.json"
     if outcome_path.exists():
         try:
             data = json.loads(outcome_path.read_text(encoding="utf-8"))
+
+            # Unmet requirements: classify by type
             for req in data.get("unmet", []):
+                if isinstance(req, str):
+                    desc = req
+                    req_type = "technical"
+                elif isinstance(req, dict):
+                    desc = req.get("requirement") or req.get("description") or req.get("text", "")
+                    req_type = (req.get("type") or "technical").lower()
+                else:
+                    continue
+                if not desc:
+                    continue
+
+                if req_type == "business":
+                    learning = (
+                        f"Product decision needed: {desc}. "
+                        f"This is not a code issue."
+                    )
+                    _try_append("product-backlog", learning,
+                                "outcome-report.json", "low",
+                                existing, counts)
+                else:
+                    learning = (
+                        f"Requirement not met: {desc}. Action: add as explicit "
+                        f"feature with acceptance criteria: [input] -> [expected output]."
+                    )
+                    _try_append("unmet-requirement", learning,
+                                "outcome-report.json", "high",
+                                existing, counts)
+
+            # Deferred items (business decisions) → product-backlog
+            for req in data.get("deferred", []):
                 if isinstance(req, str):
                     desc = req
                 elif isinstance(req, dict):
@@ -358,11 +391,11 @@ def cmd_extract():
                 if not desc:
                     continue
                 learning = (
-                    f"Requirement not met: {desc}. Action: add as explicit "
-                    f"feature with acceptance criteria: [input] -> [expected output]."
+                    f"Product decision needed: {desc}. "
+                    f"This is not a code issue."
                 )
-                _try_append("unmet-requirement", learning,
-                            "outcome-report.json", "high",
+                _try_append("product-backlog", learning,
+                            "outcome-report.json", "low",
                             existing, counts)
         except (json.JSONDecodeError, OSError):
             pass
@@ -402,6 +435,143 @@ def cmd_extract():
         print(f"{WARN_ICON} No learnings to extract (no issues found in artifacts)")
 
 
+# ── Apply learnings to context ────────────────────────────────────────
+
+_AUDIENCE_KEYWORDS = re.compile(
+    r"audience|copy|messaging|value.?prop|positioning|brand|tone|voice|conversion",
+    re.IGNORECASE,
+)
+_STACK_KEYWORDS = re.compile(
+    r"stack|architect|infra|deploy|database|framework|runtime|dependency",
+    re.IGNORECASE,
+)
+_DEPENDENCY_KEYWORDS = re.compile(
+    r"dependency|install|import|module|package|pip|npm|apt|brew|redis|docker|postgres|kafka",
+    re.IGNORECASE,
+)
+_BUSINESS_KEYWORDS = re.compile(
+    r"business|product|pricing|legal|compliance|stakeholder|manual|human|decision",
+    re.IGNORECASE,
+)
+
+
+def _ensure_file(path, header=""):
+    """Create file with header if it doesn't exist. Returns Path."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        p.write_text(header + "\n", encoding="utf-8")
+    return p
+
+
+def _append_to_file(path, line):
+    """Append a line to a file, avoiding exact duplicates."""
+    p = Path(path)
+    existing = ""
+    if p.exists():
+        existing = p.read_text(encoding="utf-8")
+    if line.strip() in existing:
+        return False
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    return True
+
+
+def cmd_apply():
+    """Read learnings and auto-update context files for the next run.
+
+    Categories handled:
+    - unmet-requirement (TECHNICAL) -> context/prd.md
+    - spec-gap -> context/domains/ or context/company/tech-standards.md
+    - error-pattern (dependency) -> context/company/build-constraints.md
+    - BUSINESS/PRODUCT -> context/product-backlog.md
+    """
+    entries = _read_all_entries()
+    if not entries:
+        print(f"{WARN_ICON} No learnings to apply")
+        return
+
+    applied = 0
+    prd_path = Path("context/prd.md")
+
+    for entry in entries:
+        cat = entry.get("category", "")
+        learning = entry.get("learning", "")
+        severity = entry.get("severity", "low")
+        if not learning:
+            continue
+
+        # ── 1. unmet-requirement → PRD ──
+        if cat == "unmet-requirement":
+            _ensure_file(prd_path, "# PRD\n")
+            content = prd_path.read_text(encoding="utf-8")
+            section = "## Learnings from Previous Runs"
+            if section not in content:
+                with open(prd_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n{section}\n\n")
+            # Extract the action part
+            action = learning
+            if "Action:" in learning:
+                action = learning.split("Action:", 1)[1].strip()
+            elif "Auto-fix:" in learning:
+                action = learning.split("Auto-fix:", 1)[1].strip()
+            line = f"- {action}"
+            if _append_to_file(prd_path, line):
+                applied += 1
+
+        # ── 2. spec-gap → domains or tech-standards ──
+        elif cat == "spec-gap":
+            if _AUDIENCE_KEYWORDS.search(learning):
+                # Try to find domain value-props files
+                domain_dirs = sorted(Path("context/domains").glob("*/")) if Path("context/domains").is_dir() else []
+                if domain_dirs:
+                    target = domain_dirs[0] / "value-propositions.md"
+                else:
+                    target = Path("context/domains/default/value-propositions.md")
+                _ensure_file(target, "# Value Propositions\n")
+                line = f"- [SPEC-GAP] {learning[:200]}"
+                if _append_to_file(target, line):
+                    applied += 1
+            elif _STACK_KEYWORDS.search(learning):
+                target = Path("context/company/tech-standards.md")
+                _ensure_file(target, "# Tech Standards\n")
+                line = f"- [SPEC-GAP] {learning[:200]}"
+                if _append_to_file(target, line):
+                    applied += 1
+            else:
+                # Default: append to tech-standards
+                target = Path("context/company/tech-standards.md")
+                _ensure_file(target, "# Tech Standards\n")
+                line = f"- [SPEC-GAP] {learning[:200]}"
+                if _append_to_file(target, line):
+                    applied += 1
+
+        # ── 3. error-pattern (dependency) → build-constraints ──
+        elif cat == "error-pattern":
+            if _DEPENDENCY_KEYWORDS.search(learning):
+                target = Path("context/company/build-constraints.md")
+                _ensure_file(target, "# Build Constraints\n")
+                line = f"- {learning[:200]}"
+                if _append_to_file(target, line):
+                    applied += 1
+
+        # ── 4. BUSINESS/PRODUCT learnings → product-backlog ──
+        if _BUSINESS_KEYWORDS.search(learning) and cat in ("unmet-requirement", "assumption"):
+            target = Path("context/product-backlog.md")
+            _ensure_file(
+                target,
+                "# Product Backlog\n\n## Product Decisions Needed\n",
+            )
+            line = f"- {learning[:200]}"
+            if _append_to_file(target, line):
+                applied += 1
+
+    if applied > 0:
+        print(f"{PASS_ICON} Applied {applied} learnings to context files")
+    else:
+        print(f"{DIM}No new learnings to apply (already up to date){RESET}")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 def main():
@@ -411,7 +581,8 @@ def main():
             "  python3 .forja-tools/forja_learnings.py log "
             "--category X --learning 'text' --source Y --severity Z\n"
             "  python3 .forja-tools/forja_learnings.py manifest\n"
-            "  python3 .forja-tools/forja_learnings.py extract"
+            "  python3 .forja-tools/forja_learnings.py extract\n"
+            "  python3 .forja-tools/forja_learnings.py apply"
         )
         sys.exit(1)
 
@@ -452,9 +623,12 @@ def main():
     elif command == "extract":
         cmd_extract()
 
+    elif command == "apply":
+        cmd_apply()
+
     else:
         print(f"{FAIL_ICON} Unknown command: {command}")
-        print("  Valid: log, manifest, extract")
+        print("  Valid: log, manifest, extract, apply")
         sys.exit(1)
 
 

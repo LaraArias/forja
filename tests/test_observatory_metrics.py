@@ -49,6 +49,7 @@ class TestComputeMetricsEmpty:
         assert m["num_teammates"] == 0
         assert m["total_time_minutes"] == 0
         assert m["roadmap"] == []
+        assert m["outcome_deferred"] == []
 
 
 class TestComputeMetricsAllPassed:
@@ -105,7 +106,8 @@ class TestComputeMetricsAllPassed:
 class TestComputeMetricsMixed:
     """Metrics with blocked, failed, and passed features."""
 
-    def test_some_blocked_is_warn(self):
+    def test_50pct_passed_is_warn(self):
+        """1/2 passed = 50% → warn (partial success)."""
         feats = [
             {"id": "f1", "status": "passed", "cycles": 1},
             {"id": "f2", "status": "blocked", "cycles": 5},
@@ -119,7 +121,8 @@ class TestComputeMetricsMixed:
         assert m["total_passed"] == 1
         assert m["total_failed"] == 0
 
-    def test_some_failed_is_fail(self):
+    def test_50pct_with_failed_is_warn(self):
+        """1/2 passed = 50% → warn even with failures (partial success)."""
         feats = [
             {"id": "f1", "status": "passed", "cycles": 1},
             {"id": "f2", "status": "failed", "cycles": 2},
@@ -128,8 +131,35 @@ class TestComputeMetricsMixed:
         m = _compute_metrics(
             teammates, None, None, [], None, [], [], {}, 0, 0,
         )
-        assert m["build_status"] == "fail"
+        assert m["build_status"] == "warn"
         assert m["total_failed"] == 1
+
+    def test_below_50pct_is_fail(self):
+        """1/3 passed = 33% → fail."""
+        feats = [
+            {"id": "f1", "status": "passed", "cycles": 1},
+            {"id": "f2", "status": "failed", "cycles": 2},
+            {"id": "f3", "status": "failed", "cycles": 3},
+        ]
+        teammates = [{"teammate": "eve", "features": feats}]
+        m = _compute_metrics(
+            teammates, None, None, [], None, [], [], {}, 0, 0,
+        )
+        assert m["build_status"] == "fail"
+        assert m["total_failed"] == 2
+        assert m["total_passed"] == 1
+
+    def test_high_pass_rate_is_warn(self):
+        """15/19 passed = 78% → warn (the real-world case from your analysis)."""
+        feats = [{"id": f"f{i}", "status": "passed", "cycles": 1} for i in range(15)]
+        feats += [{"id": f"f{i}", "status": "failed", "cycles": 3} for i in range(15, 19)]
+        teammates = [{"teammate": "team", "features": feats}]
+        m = _compute_metrics(
+            teammates, None, None, [], None, [], [], {}, 0, 0,
+        )
+        assert m["build_status"] == "warn"
+        assert m["total_passed"] == 15
+        assert m["total_failed"] == 4
 
     def test_feature_cycles_data(self):
         feats = [
@@ -176,12 +206,23 @@ class TestComputeMetricsPipelinePhases:
         assert m["sr_gaps"] == 2
         assert m["sr_enrichments"] == 3
 
-    def test_spec_review_fail(self):
+    def test_spec_review_fail_no_enrichment(self):
+        """Gaps found, NO enrichment → fail."""
         sr = {"passed": False, "gaps_count": 5, "enrichment": []}
         m = _compute_metrics(
             [], sr, None, [], None, [], [], {}, 0, 0,
         )
         assert m["sr_status"] == "fail"
+
+    def test_spec_review_warn_with_enrichment(self):
+        """Gaps found but resolved via enrichment → warn."""
+        sr = {"passed": False, "gaps_count": 3, "enrichment": ["fix1", "fix2"]}
+        m = _compute_metrics(
+            [], sr, None, [], None, [], [], {}, 0, 0,
+        )
+        assert m["sr_status"] == "warn"
+        assert m["sr_gaps"] == 3
+        assert m["sr_enrichments"] == 2
 
     def test_outcome_pass(self):
         outcome = {"coverage": 85, "met": ["req1", "req2"], "unmet": []}
@@ -191,12 +232,36 @@ class TestComputeMetricsPipelinePhases:
         assert m["outcome_status"] == "pass"
         assert m["outcome_coverage"] == 85
 
-    def test_outcome_fail(self):
+    def test_outcome_warn_partial(self):
+        """60% coverage → warn (partial, not fail)."""
         outcome = {"coverage": 60, "met": ["req1"], "unmet": ["req2"]}
         m = _compute_metrics(
             [], None, None, [], outcome, [], [], {}, 0, 0,
         )
+        assert m["outcome_status"] == "warn"
+
+    def test_outcome_fail_low_coverage(self):
+        """30% coverage → fail."""
+        outcome = {"coverage": 30, "met": ["req1"], "unmet": ["req2", "req3", "req4"]}
+        m = _compute_metrics(
+            [], None, None, [], outcome, [], [], {}, 0, 0,
+        )
         assert m["outcome_status"] == "fail"
+
+    def test_outcome_deferred_requirements(self):
+        """Deferred business requirements are tracked separately."""
+        outcome = {
+            "coverage": 85,
+            "met": ["user auth", "API endpoints"],
+            "unmet": [],
+            "deferred": ["pricing model", "partner integrations"],
+        }
+        m = _compute_metrics(
+            [], None, None, [], outcome, [], [], {}, 0, 0,
+        )
+        assert m["outcome_status"] == "pass"
+        assert m["outcome_deferred"] == ["pricing model", "partner integrations"]
+        assert len(m["outcome_deferred"]) == 2
 
     def test_learnings_severity_counts(self):
         learnings = [

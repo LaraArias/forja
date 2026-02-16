@@ -205,7 +205,15 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
     sr_gaps = spec_review.get("gaps_count", 0) if spec_review else 0
     sr_enrichments = len(spec_review.get("enrichment", [])) if spec_review else 0
     sr_passed = spec_review.get("passed", True) if spec_review else True
-    sr_status = ("pass" if sr_passed else "fail") if spec_review else "skip"
+    if not spec_review:
+        sr_status = "skip"
+    elif sr_passed:
+        sr_status = "pass"
+    elif sr_enrichments > 0:
+        # Found gaps but resolved them via enrichment → warn, not fail
+        sr_status = "warn"
+    else:
+        sr_status = "fail"
 
     # ── Plan Mode ──
     plan_experts = plan_transcript.get("experts", []) if plan_transcript else []
@@ -291,10 +299,15 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
         if len(timestamps) >= 2:
             total_time_minutes = round((max(timestamps) - min(timestamps)) / 60)
 
-    build_status = "pass" if total_passed == total_features and total_features > 0 else (
-        "warn" if total_blocked > 0 and total_failed == 0 and total_features > 0 else (
-        "fail" if total_features > 0 else "skip"
-    ))
+    if total_features == 0:
+        build_status = "skip"
+    elif total_passed == total_features:
+        build_status = "pass"
+    elif total_features > 0 and total_passed / total_features >= 0.5:
+        # ≥50% passed → partial success (warn), not fail
+        build_status = "warn"
+    else:
+        build_status = "fail"
 
     # ── Cross-model ──
     cm_high = sum(1 for i in crossmodel_issues if i.get("severity", "").lower() == "high")
@@ -305,9 +318,24 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
     outcome_coverage = outcome.get("coverage", 0) if outcome else 0
     outcome_met = outcome.get("met", []) if outcome else []
     outcome_unmet = outcome.get("unmet", []) if outcome else []
-    outcome_status = "pass" if outcome and outcome_coverage >= 80 else (
-        "fail" if outcome else "skip"
-    )
+    outcome_deferred = outcome.get("deferred", []) if outcome else []
+
+    # Technical coverage: only counts technical requirements (met + unmet),
+    # excluding deferred business items.
+    tech_met = len(outcome_met)
+    tech_unmet = len(outcome_unmet)
+    tech_total = tech_met + tech_unmet
+    outcome_tech_coverage = round(tech_met / tech_total * 100) if tech_total > 0 else outcome_coverage
+
+    if not outcome:
+        outcome_status = "skip"
+    elif outcome_tech_coverage >= 80:
+        outcome_status = "pass"
+    elif outcome_tech_coverage >= 50:
+        # Partial coverage → warn (not fail)
+        outcome_status = "warn"
+    else:
+        outcome_status = "fail"
 
     # ── Learnings ──
     learnings_by_cat = {}
@@ -336,7 +364,9 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
         "plan_assumptions": plan_assumptions,
         "build_status": build_status,
         "outcome_status": outcome_status, "outcome_coverage": outcome_coverage,
+        "outcome_tech_coverage": outcome_tech_coverage,
         "outcome_met": outcome_met, "outcome_unmet": outcome_unmet,
+        "outcome_deferred": outcome_deferred,
         "learnings_status": learnings_status,
         "learnings_total": len(learnings), "learnings_by_cat": learnings_by_cat,
         "learnings_high": learnings_high, "learnings_med": learnings_med,
@@ -428,6 +458,7 @@ def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=
         "crossmodel_issues": m["crossmodel_issues"][:30],
         "outcome_met": m["outcome_met"],
         "outcome_unmet": m["outcome_unmet"],
+        "outcome_deferred": m["outcome_deferred"],
         "plan_experts": m["plan_experts"],
         "plan_answers": m["plan_answers"],
         "learnings_by_cat": {cat: [
@@ -453,6 +484,7 @@ def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=
         "num_teammates": m["num_teammates"],
         "total_time_minutes": m["total_time_minutes"],
         "outcome_status": m["outcome_status"], "outcome_coverage": m["outcome_coverage"],
+        "outcome_tech_coverage": m["outcome_tech_coverage"],
         "learnings_status": m["learnings_status"], "learnings_total": m["learnings_total"],
         "learnings_high": m["learnings_high"], "learnings_med": m["learnings_med"],
         "learnings_low": m["learnings_low"],

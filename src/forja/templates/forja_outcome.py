@@ -30,18 +30,29 @@ You will receive:
 2. Features data (what was attempted and whether each feature passed tests)
 3. Validation specs / endpoints (what HTTP routes exist)
 
-For each distinct requirement in the PRD, determine if it was MET or UNMET:
+First, classify each PRD requirement into one of two categories:
+- TECHNICAL: Can be built by code (endpoints, UI, logic, database schema, auth, etc.)
+- BUSINESS: Requires human decisions, not code (pricing, partnerships, marketing, \
+legal, content strategy, business model, monetization)
+
+Then evaluate only TECHNICAL requirements:
 - MET means there is a corresponding feature that passed AND an endpoint that serves it
 - UNMET means no matching feature, or the feature failed, or no endpoint exists
 
-Be strict. A requirement is only MET if there is clear evidence it works.
+BUSINESS requirements are DEFERRED - they cannot be evaluated as met/unmet because \
+they require human decisions, not code. Do NOT count them against coverage.
+
+Be strict. A TECHNICAL requirement is only MET if there is clear evidence it works.
+Coverage = MET / (MET + UNMET) * 100. DEFERRED requirements are excluded from this \
+calculation.
 
 Return ONLY valid JSON, no markdown:
 {
   "pass": true/false,
   "coverage": 0-100,
-  "met": ["requirement 1 description", "requirement 2 description"],
-  "unmet": ["requirement 3 description"],
+  "met": ["technical requirement 1", "technical requirement 2"],
+  "unmet": ["technical requirement 3"],
+  "deferred": ["business requirement 1 (reason: needs pricing decision)"],
   "summary": "One-line overall assessment"
 }
 
@@ -119,6 +130,7 @@ def _print_text(result):
     coverage = result.get("coverage", 0)
     met = result.get("met", [])
     unmet = result.get("unmet", [])
+    deferred = result.get("deferred", [])
     summary = result.get("summary", "")
 
     # Header
@@ -140,6 +152,12 @@ def _print_text(result):
         print(f"\n  {BOLD}Requirements UNMET ({len(unmet)}):{RESET}")
         for u in unmet:
             print(f"    {RED}✘{RESET} {u}")
+
+    # Deferred (business decisions)
+    if deferred:
+        print(f"\n  {BOLD}Deferred — Business Decisions ({len(deferred)}):{RESET}")
+        for d in deferred:
+            print(f"    {WARN_ICON} {d}")
 
     print()
 
