@@ -27,7 +27,7 @@ from forja.config import run_config
 from forja.constants import PRD_PATH
 from forja.init import run_init
 from forja.planner import run_plan
-from forja.runner import run_forja, run_iterate
+from forja.runner import run_auto_forja, run_forja, run_iterate
 from forja.status import show_status
 from forja.utils import VERSION, setup_logging
 
@@ -41,8 +41,10 @@ Commands:
   forja init            Set up a new project (scaffolding + Plan Mode)
   forja run             Build the project (spec review \u2192 build \u2192 outcome \u2192 learnings \u2192 observatory)
   forja iterate         Review failures, improve PRD with feedback, re-run
+  forja auto            Autonomous build-iterate loop until quality gates pass
   forja status          Show feature progress during or after a build
   forja report          Open the observatory dashboard in your browser
+  forja audit           Show decision audit trail (decisions, facts, assumptions)
   forja config          Configure API keys
   forja plan            Run Plan Mode standalone (expert panel + PRD generation)
   forja init --upgrade  Update templates without touching context
@@ -86,6 +88,16 @@ def cmd_iterate(args: argparse.Namespace) -> None:
     sys.exit(0 if success else 1)
 
 
+def cmd_auto(args: argparse.Namespace) -> None:
+    """Run autonomous build-iterate loop until quality gates pass."""
+    success = run_auto_forja(
+        prd_path=args.prd_path,
+        max_iterations=args.max_iterations,
+        coverage_target=args.coverage,
+    )
+    sys.exit(0 if success else 1)
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show Forja project status."""
     success = show_status()
@@ -108,6 +120,20 @@ def cmd_report(args: argparse.Namespace) -> None:
     abs_path = html_path.resolve()
     print(f"Opening dashboard: {abs_path}")
     webbrowser.open(f"file://{abs_path}")
+
+
+def cmd_audit(args: argparse.Namespace) -> None:
+    """Show decision audit trail."""
+    import subprocess
+    tools_script = Path(".forja-tools") / "forja_context.py"
+    if not tools_script.exists():
+        print("No .forja-tools found. Run 'forja init' first.")
+        sys.exit(1)
+    cmd = [sys.executable, str(tools_script), "audit"]
+    if args.type:
+        cmd.extend(["--type", args.type])
+    result = subprocess.run(cmd, timeout=30)
+    sys.exit(result.returncode)
 
 
 def cmd_help(args: argparse.Namespace) -> None:
@@ -158,6 +184,15 @@ def main() -> None:
     p_iterate.add_argument("prd_path", nargs="?", default=str(PRD_PATH), help="Path to PRD")
     p_iterate.set_defaults(func=cmd_iterate)
 
+    # auto
+    p_auto = subparsers.add_parser("auto", help="Autonomous build-iterate loop until quality gates pass")
+    p_auto.add_argument("prd_path", nargs="?", default=str(PRD_PATH), help="Path to PRD")
+    p_auto.add_argument("--max-iterations", "-n", type=int, default=None,
+                         help="Max iterations (overrides forja.toml, default: 5)")
+    p_auto.add_argument("--coverage", "-c", type=int, default=None,
+                         help="Coverage target %% (overrides forja.toml, default: 80)")
+    p_auto.set_defaults(func=cmd_auto)
+
     # status
     p_status = subparsers.add_parser("status", help="View feature status")
     p_status.set_defaults(func=cmd_status)
@@ -165,6 +200,13 @@ def main() -> None:
     # report
     p_report = subparsers.add_parser("report", help="Open observatory dashboard")
     p_report.set_defaults(func=cmd_report)
+
+    # audit
+    p_audit = subparsers.add_parser("audit", help="Show decision audit trail")
+    p_audit.add_argument("--type", "-t",
+                         choices=["DECISION", "FACT", "ASSUMPTION", "OBSERVATION"],
+                         help="Filter by entry type")
+    p_audit.set_defaults(func=cmd_audit)
 
     # help
     p_help = subparsers.add_parser("help", help="Show this help text")

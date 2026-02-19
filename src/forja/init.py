@@ -43,6 +43,7 @@ TEMPLATES = [
     ("forja_outcome.py", ".forja-tools/forja_outcome.py"),
     ("forja_learnings.py", ".forja-tools/forja_learnings.py"),
     ("forja_qa_playwright.py", ".forja-tools/forja_qa_playwright.py"),
+    ("forja_visual_eval.py", ".forja-tools/forja_visual_eval.py"),
     ("forja_handoff.py", ".forja-tools/forja_handoff.py"),
     ("forja.toml.default", "forja.toml"),
 ]
@@ -262,6 +263,7 @@ def _run_preflight(target: Path) -> bool | None:
     result = subprocess.run(
         [sys.executable, str(preflight)],
         cwd=str(target),
+        timeout=30,
     )
     return result.returncode == 0
 
@@ -305,11 +307,13 @@ def _copy_skill(target: Path, skill_name: str) -> None:
         print(f"  {WARN_ICON} Skill template not found: {skill_name}")
         return
 
-    # Copy workflow.json if it exists
+    # Copy workflow.json to .forja/ (runner reads WORKFLOW_PATH = .forja/workflow.json)
     try:
         workflow_src = skill_dir / "workflow.json"
         content = workflow_src.read_text(encoding="utf-8")
-        (dest_dir / "workflow.json").write_text(content, encoding="utf-8")
+        forja_dir = target / ".forja"
+        forja_dir.mkdir(parents=True, exist_ok=True)
+        (forja_dir / "workflow.json").write_text(content, encoding="utf-8")
         print(f"  {PASS_ICON} Workflow pipeline configured")
     except (OSError, TypeError):
         pass  # workflow.json is optional for skills without pipelines

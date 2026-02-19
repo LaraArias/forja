@@ -577,6 +577,7 @@ class Feature:
     created_at: Optional[str] = None
     passed_at: Optional[str] = None
     blocked_at: Optional[str] = None
+    evidence: Optional[str] = None  # Why the feature passed (probe results, test output, etc.)
     name: Optional[str] = None  # Legacy fallback for description
     _teammate: Optional[str] = field(default=None, repr=False)
     _extra: dict = field(default_factory=dict, repr=False)
@@ -598,7 +599,7 @@ class Feature:
         known_keys = {
             "id", "description", "status", "cycles",
             "created_at", "passed_at", "blocked_at",
-            "name", "_teammate",
+            "evidence", "name", "_teammate",
             # Legacy keys consumed above — not stored
             "blocked", "passes", "passed",
         }
@@ -612,6 +613,7 @@ class Feature:
             created_at=d.get("created_at"),
             passed_at=d.get("passed_at"),
             blocked_at=d.get("blocked_at"),
+            evidence=d.get("evidence"),
             name=d.get("name"),
             _teammate=d.get("_teammate"),
             _extra=extra,
@@ -635,6 +637,8 @@ class Feature:
             d["passed_at"] = self.passed_at
         if self.blocked_at is not None:
             d["blocked_at"] = self.blocked_at
+        if self.evidence is not None:
+            d["evidence"] = self.evidence
         # Preserve any unknown keys for forward compat
         d.update(self._extra)
         return d

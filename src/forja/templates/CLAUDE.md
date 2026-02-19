@@ -93,7 +93,9 @@ Maximum 2KB. Include:
 - Which files to create (in src/[name]/)
 - Hardcoded path: "Your features.json is at context/teammates/[name]/features.json"
 - Hardcoded path: "Your validation_spec.json is at context/teammates/[name]/validation_spec.json"
-- Instruction: "When you think a feature is ready, run: python3 .forja-tools/forja_features.py attempt [id] --dir context/teammates/[name]/. If validation passes, run: python3 .forja-tools/forja_features.py pass [id] --dir context/teammates/[name]/"
+- If context/teammates/[name]/context.md exists: "FIRST: Read context/teammates/[name]/context.md — it contains your scoped business context. Use ONLY this context for your decisions."
+- If context/teammates/[name]/phase_prompt.md exists: "Read context/teammates/[name]/phase_prompt.md for your phase-specific instructions."
+- Instruction: "When you think a feature is ready, run: python3 .forja-tools/forja_features.py attempt [id] --dir context/teammates/[name]/. If validation passes, run: python3 .forja-tools/forja_features.py pass [id] --dir context/teammates/[name]/ --evidence 'brief proof: e.g. tests pass, endpoint returns 201, curl verified'"
 - Instruction: "When you finish a task, read features.json. If there are features with status other than 'passed', work on the next one. Do not stop until all have status 'passed'."
 - Instruction: "Do not ask for human confirmation. If 2 approaches fail, escalate to the lead."
 - Instruction: "Commit after each task: git commit --author='teammate-[name] <[name]@forja>' -m '[message]'"

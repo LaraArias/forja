@@ -165,7 +165,7 @@ class TestCopySkill:
         _copy_skill(tmp_path, "landing-page")
 
         skill_json = tools_dir / "skill.json"
-        workflow_json = tools_dir / "workflow.json"
+        workflow_json = tmp_path / ".forja" / "workflow.json"
 
         assert skill_json.exists()
         assert workflow_json.exists()
@@ -185,7 +185,7 @@ class TestCopySkill:
 
         _copy_skill(tmp_path, "api-backend")
 
-        workflow_json = tools_dir / "workflow.json"
+        workflow_json = tmp_path / ".forja" / "workflow.json"
         assert workflow_json.exists()
 
         workflow_data = json.loads(workflow_json.read_text(encoding="utf-8"))

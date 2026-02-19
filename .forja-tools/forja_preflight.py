@@ -21,9 +21,9 @@ try:
 except ImportError:
     HAS_URLLIB = False
 
-PASS = "\033[32m\u2714\033[0m"
-FAIL = "\033[31m\u2718\033[0m"
-WARN = "\033[33m\u26a0\033[0m"
+PASS = "\033[32m✔\033[0m"
+FAIL = "\033[31m✘\033[0m"
+WARN = "\033[33m⚠\033[0m"
 
 # Current package version (written by forja init)
 CURRENT_VERSION = "0.1.0"
@@ -101,10 +101,12 @@ def _check_anthropic_api_key():
     if not HAS_URLLIB:
         return True  # Can't check, assume OK
 
-    # Use the messages endpoint with a minimal request to validate the key
+    # Use the messages endpoint with a minimal request to validate the key.
+    # Model name from env var override or default.
+    model = os.environ.get("FORJA_MODELS_ANTHROPIC_MODEL", "claude-opus-4-6")
     url = "https://api.anthropic.com/v1/messages"
     body = json.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": model,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "hi"}],
     }).encode("utf-8")

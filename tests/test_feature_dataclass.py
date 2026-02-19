@@ -183,3 +183,39 @@ class TestReadFeatureStatusWithFeature:
 
     def test_with_legacy_dict(self):
         assert read_feature_status({"passes": True}) == "passed"
+
+
+class TestEvidenceField:
+    """Feature.evidence round-trips through from_dict/to_dict."""
+
+    def test_evidence_from_dict(self):
+        d = {"id": "f1", "status": "passed", "evidence": "tests pass"}
+        f = Feature.from_dict(d)
+        assert f.evidence == "tests pass"
+
+    def test_evidence_to_dict(self):
+        f = Feature(id="f1", status="passed", evidence="tests pass")
+        out = f.to_dict()
+        assert out["evidence"] == "tests pass"
+
+    def test_no_evidence_omitted_from_dict(self):
+        f = Feature(id="f1", status="passed")
+        out = f.to_dict()
+        assert "evidence" not in out
+
+    def test_evidence_round_trip(self):
+        d = {"id": "f1", "status": "passed", "cycles": 1, "evidence": "3/3 tests pass"}
+        f = Feature.from_dict(d)
+        out = f.to_dict()
+        assert out["evidence"] == "3/3 tests pass"
+
+    def test_evidence_none_by_default(self):
+        f = Feature(id="f1")
+        assert f.evidence is None
+
+    def test_evidence_not_in_extra(self):
+        """Evidence should be a first-class field, not stored in _extra."""
+        d = {"id": "f1", "status": "passed", "evidence": "probe OK"}
+        f = Feature.from_dict(d)
+        assert "evidence" not in f._extra
+        assert f.evidence == "probe OK"

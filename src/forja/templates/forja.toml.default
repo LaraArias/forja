@@ -8,6 +8,8 @@ timeout_stall_minutes = 12
 timeout_absolute_minutes = 20
 max_cycles_per_feature = 5
 auto_open = true
+quality_visual_score = 70  # minimum visual evaluation score (0-100)
+quality_probe_pass_rate = 70  # minimum endpoint probe pass rate (0-100)
 
 [models]
 kimi_model = "kimi-k2-0711-preview"

@@ -355,3 +355,312 @@ class TestCmdExtractIntegration:
         assert "What database to use?" in learning
         assert "SQLite for simplicity" in learning
         assert "validate with stakeholder" in learning
+
+
+# ── _extract_action tests ────────────────────────────────────────────
+
+from forja.templates.forja_learnings import (
+    _extract_action,
+    _extract_short_title,
+    cmd_synthesize,
+    cmd_apply,
+)
+
+
+class TestExtractAction:
+    """Verify action extraction from learning text."""
+
+    def test_extracts_autofix(self):
+        text = "Something failed. Auto-fix: add bcrypt to requirements.txt"
+        assert _extract_action(text) == "add bcrypt to requirements.txt"
+
+    def test_extracts_action_marker(self):
+        text = "Code issue found. Action: add validation rule"
+        assert _extract_action(text) == "add validation rule"
+
+    def test_returns_empty_when_no_marker(self):
+        text = "Generic learning without action markers"
+        assert _extract_action(text) == ""
+
+
+class TestExtractShortTitle:
+    """Verify short title extraction."""
+
+    def test_period_separator(self):
+        text = "Auth dependencies missing. Should pre-install them."
+        assert _extract_short_title(text) == "Auth dependencies missing"
+
+    def test_colon_separator(self):
+        text = "PRD gap found: no error handling spec defined"
+        assert _extract_short_title(text) == "PRD gap found"
+
+    def test_dash_separator(self):
+        text = "Feature auth-001 — required 4 cycles to build"
+        assert _extract_short_title(text) == "Feature auth-001"
+
+    def test_truncates_long_text(self):
+        text = "A" * 100  # no separator, 100 chars
+        result = _extract_short_title(text)
+        assert len(result) <= 60
+
+
+# ── cmd_synthesize tests ─────────────────────────────────────────────
+
+class TestCmdSynthesize:
+    """End-to-end synthesize with filesystem fixtures."""
+
+    def _write_jsonl(self, learnings_dir, entries):
+        """Helper: write entries to a JSONL file."""
+        fpath = learnings_dir / "test.jsonl"
+        with open(fpath, "w", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+
+    def test_synthesize_creates_learnings_md(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        self._write_jsonl(learnings_dir, [
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "category": "error-pattern",
+                "learning": "Feature auth-001 required 4 cycles. Auto-fix: add bcrypt to requirements.txt",
+                "source": "auth/features.json",
+                "severity": "high",
+            },
+        ])
+
+        cmd_synthesize()
+
+        wisdom = learnings_dir / "_learnings.md"
+        assert wisdom.exists()
+        content = wisdom.read_text(encoding="utf-8")
+        assert "Accumulated Wisdom" in content
+        assert "2026-02-16" in content
+        assert "Build failure" in content  # _CATEGORY_CONTEXT for error-pattern
+        assert "**Action**:" in content
+        assert "add bcrypt" in content
+
+    def test_synthesize_high_full_format(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        self._write_jsonl(learnings_dir, [
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "category": "kimi-finding",
+                "learning": "SQL injection in query builder. Action: add parameterized queries",
+                "source": "crossmodel/db.json",
+                "severity": "high",
+            },
+        ])
+
+        cmd_synthesize()
+
+        content = (learnings_dir / "_learnings.md").read_text(encoding="utf-8")
+        # HIGH severity → full format with ## header, Context, Error, Principle, Action
+        assert "##" in content
+        assert "**Context**:" in content
+        assert "**Error**:" in content
+        assert "**Principle**:" in content
+        assert "**Action**:" in content
+        assert "add parameterized queries" in content
+
+    def test_synthesize_medium_compact_format(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        self._write_jsonl(learnings_dir, [
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "category": "assumption",
+                "learning": "Assumed SQLite was good enough",
+                "source": "plan-transcript.json",
+                "severity": "medium",
+            },
+        ])
+
+        cmd_synthesize()
+
+        content = (learnings_dir / "_learnings.md").read_text(encoding="utf-8")
+        # MEDIUM severity → compact one-liner with - [MEDIUM]
+        assert "[MEDIUM]" in content
+        assert "Assumed SQLite" in content
+
+    def test_synthesize_empty_entries(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        # No JSONL files → no _learnings.md created
+        cmd_synthesize()
+        assert not (learnings_dir / "_learnings.md").exists()
+
+    def test_synthesize_caps_at_50(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        # Write 60 entries
+        entries = [
+            {
+                "timestamp": f"2026-02-16T10:{i:02d}:00+00:00",
+                "category": "error-pattern",
+                "learning": f"Learning number {i}",
+                "source": "test",
+                "severity": "low",
+            }
+            for i in range(60)
+        ]
+        self._write_jsonl(learnings_dir, entries)
+
+        cmd_synthesize()
+
+        content = (learnings_dir / "_learnings.md").read_text(encoding="utf-8")
+        # Should have at most 50 entries (compact lines start with "- ")
+        compact_lines = [l for l in content.splitlines() if l.startswith("- **[")]
+        assert len(compact_lines) <= 50
+
+
+# ── Enhanced cmd_apply tests (rules 5 + 6) ───────────────────────────
+
+class TestCmdApplyAntiPatterns:
+    """Rule 5: anti-patterns → DOMAIN.md."""
+
+    def _write_jsonl(self, learnings_dir, entries):
+        fpath = learnings_dir / "test.jsonl"
+        with open(fpath, "w", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+
+    def test_antipattern_appended_to_domain_md(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        # Create a domain file
+        domain_dir = tmp_path / "context" / "domains" / "auth"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "DOMAIN.md").write_text(
+            "# Auth Domain\n\nHandles authentication.\n",
+            encoding="utf-8",
+        )
+
+        self._write_jsonl(learnings_dir, [
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "category": "error-pattern",
+                "learning": "Should not use plain text passwords, avoid storing secrets in env vars",
+                "source": "auth/features.json",
+                "severity": "high",
+            },
+        ])
+
+        cmd_apply()
+
+        content = (domain_dir / "DOMAIN.md").read_text(encoding="utf-8")
+        assert "## Anti-patterns" in content
+        assert "[LEARNED]" in content
+        assert "plain text passwords" in content
+
+    def test_no_antipattern_without_keywords(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        domain_dir = tmp_path / "context" / "domains" / "auth"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "DOMAIN.md").write_text(
+            "# Auth Domain\n\nHandles authentication.\n",
+            encoding="utf-8",
+        )
+
+        self._write_jsonl(learnings_dir, [
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "category": "error-pattern",
+                "learning": "Feature auth-001 required 4 cycles. Auto-fix: add bcrypt to requirements.txt",
+                "source": "auth/features.json",
+                "severity": "high",
+            },
+        ])
+
+        cmd_apply()
+
+        content = (domain_dir / "DOMAIN.md").read_text(encoding="utf-8")
+        # No anti-pattern keywords → no Anti-patterns section
+        assert "## Anti-patterns" not in content
+
+
+class TestCmdApplyKimiValidation:
+    """Rule 6: kimi findings → validation-rules.md."""
+
+    def _write_jsonl(self, learnings_dir, entries):
+        fpath = learnings_dir / "test.jsonl"
+        with open(fpath, "w", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+
+    def test_kimi_finding_creates_validation_rules(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        company_dir = tmp_path / "context" / "company"
+        company_dir.mkdir(parents=True)
+
+        self._write_jsonl(learnings_dir, [
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "category": "kimi-finding",
+                "learning": "Code issue found by reviewer: SQL injection in query builder. Action: add validation rule",
+                "source": "crossmodel/db.json",
+                "severity": "high",
+            },
+        ])
+
+        cmd_apply()
+
+        target = company_dir / "validation-rules.md"
+        assert target.exists()
+        content = target.read_text(encoding="utf-8")
+        assert "# Validation Rules" in content
+        assert "[KIMI]" in content
+        assert "SQL injection" in content
+
+    def test_kimi_finding_does_not_duplicate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        learnings_dir = tmp_path / "context" / "learnings"
+        learnings_dir.mkdir(parents=True)
+
+        company_dir = tmp_path / "context" / "company"
+        company_dir.mkdir(parents=True)
+
+        self._write_jsonl(learnings_dir, [
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "category": "kimi-finding",
+                "learning": "Missing input validation",
+                "source": "crossmodel/api.json",
+                "severity": "medium",
+            },
+        ])
+
+        cmd_apply()
+        cmd_apply()  # Run twice
+
+        content = (company_dir / "validation-rules.md").read_text(encoding="utf-8")
+        # _append_to_file checks for duplicates
+        assert content.count("[KIMI] Missing input validation") == 1

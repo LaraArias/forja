@@ -24,6 +24,12 @@ _DEFAULTS = {
         "timeout_absolute_minutes": 20,
         "max_cycles_per_feature": 5,
         "auto_open": True,
+        "max_auto_iterations": 5,
+        "quality_coverage": 80,
+        "quality_tests_pass": True,
+        "auto_expert_panels": False,
+        "quality_visual_score": 70,
+        "quality_probe_pass_rate": 70,
     },
     "models": {
         "kimi_model": "kimi-k2-0711-preview",
@@ -49,6 +55,12 @@ class BuildConfig:
     timeout_absolute_minutes: int
     max_cycles_per_feature: int
     auto_open: bool
+    max_auto_iterations: int
+    quality_coverage: int
+    quality_tests_pass: bool
+    auto_expert_panels: bool
+    quality_visual_score: int
+    quality_probe_pass_rate: int
 
 
 @dataclass(frozen=True)

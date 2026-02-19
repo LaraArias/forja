@@ -1,4 +1,5 @@
 #!/bin/bash
+# FORJA_TEMPLATE_VERSION=0.1.0
 set -euo pipefail
 
 # Forja PostToolUse hook wrapper.
