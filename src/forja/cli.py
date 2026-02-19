@@ -74,7 +74,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_plan(args: argparse.Namespace) -> None:
     """Run interactive PRD planning."""
-    success = run_plan(prd_path=args.prd_path)
+    success = run_plan(prd_path=args.prd_path, auto_mode=getattr(args, "auto", False))
     sys.exit(0 if success else 1)
 
 
@@ -185,6 +185,8 @@ def main() -> None:
     # plan
     p_plan = subparsers.add_parser("plan", help="Plan PRD with expert panel")
     p_plan.add_argument("prd_path", nargs="?", default=str(PRD_PATH), help="Path to PRD")
+    p_plan.add_argument("--auto", action="store_true",
+                         help="Accept all expert defaults without prompting (autonomous mode)")
     p_plan.set_defaults(func=cmd_plan)
 
     # run

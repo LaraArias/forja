@@ -925,12 +925,13 @@ def _print_header(prd_title, experts, assessment):
     print()
 
 
-def _ask_question(q, experts, prd_summary, research_log=None, total=8):
+def _ask_question(q, experts, prd_summary, research_log=None, total=8, auto_mode=False):
     """Present a question and get user response. Returns (answer, tag).
 
     *research_log*, when provided, accumulates ``{"topic": ..., "findings": ...}``
     dicts for every successful research call made during this question.
     *total* is the total number of questions in this round (for display).
+    *auto_mode*: when True, accepts all defaults without prompting the user.
     """
     expert = q["expert_name"]
     qid = q["id"]
@@ -943,6 +944,10 @@ def _ask_question(q, experts, prd_summary, research_log=None, total=8):
     print(f"  {DIM}Why it matters: \"{why}\"{RESET}")
     print(f"  {DIM}Suggestion: {default}{RESET}")
     print()
+
+    if auto_mode:
+        print(f"  {GREEN}✔ Auto-accepted{RESET}")
+        return default, "DECISION"
 
     while True:
         _flush_stdin()
@@ -1381,8 +1386,11 @@ def _run_expert_qa(
     max_questions: int = 8,
     ensure_tech: bool = False,
     ensure_design: bool = False,
+    auto_mode: bool = False,
 ) -> tuple[list[dict], list[dict], list[dict], list[dict], str]:
     """Run one round of expert panel Q&A.
+
+    When *auto_mode* is True, all defaults are accepted without user input.
 
     Returns ``(experts, questions, qa_transcript, research_log, assessment)``.
     """
@@ -1438,11 +1446,14 @@ def _run_expert_qa(
 
     qa_transcript: list[dict] = []
     research_log: list[dict] = []
-    print(f"  {DIM}Enter=accept default | skip | research [topic] to investigate | done to finish{RESET}")
+    if auto_mode:
+        print(f"  {DIM}Auto mode: accepting all expert defaults{RESET}")
+    else:
+        print(f"  {DIM}Enter=accept default | skip | research [topic] to investigate | done to finish{RESET}")
     print()
 
     for q in questions:
-        answer, tag = _ask_question(q, experts, prd_summary, research_log, total=total)
+        answer, tag = _ask_question(q, experts, prd_summary, research_log, total=total, auto_mode=auto_mode)
 
         if tag == "DONE":
             qa_transcript.append({
@@ -1518,8 +1529,8 @@ def _get_skill_how_guidance(skill: str) -> str:
 
 # ── Main entry point ────────────────────────────────────────────────
 
-def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
-    """Run Forja plan mode interactively with two expert rounds.
+def run_plan(prd_path=None, *, _called_from_runner: bool = False, auto_mode: bool = False) -> bool:
+    """Run Forja plan mode with two expert rounds.
 
     Round 1 (WHAT): Product/Strategy experts decide what to build.
     Round 2 (HOW): Technical experts decide how to build it.
@@ -1528,6 +1539,8 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     When *_called_from_runner* is True, skips messages that tell the
     user to run additional commands (since the runner continues
     automatically).
+    When *auto_mode* is True, all expert defaults are accepted without
+    user input — enables fully autonomous plan generation.
     """
     prd_file = Path(prd_path) if prd_path else PRD_PATH
 
@@ -1547,12 +1560,28 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     if prd_missing or prd_empty:
         load_dotenv()
         existing_context = _read_existing_context()
-        prd_content, continue_to_panel = _scratch_flow(existing_context, skill=skill)
-        if not prd_content:
+        if auto_mode and existing_context:
+            # In auto mode, generate PRD without interactive flow
+            idea = _summarize_context_for_idea(existing_context)
+            biz_context = _format_context_for_prompt(existing_context)
+            print(f"  {DIM}Auto mode: generating PRD from context...{RESET}")
+            prd_content, title = _generate_prd_from_idea(idea, skill=skill, context=biz_context)
+            if not prd_content:
+                print(f"  {RED}Could not generate PRD (LLM unavailable).{RESET}")
+                return False
+            prd_file.parent.mkdir(parents=True, exist_ok=True)
+            prd_file.write_text(prd_content + "\n", encoding="utf-8")
+            print(f"  {GREEN}✔ PRD auto-generated: {prd_file}{RESET}")
+        elif auto_mode:
+            print(f"  {RED}Auto mode requires existing PRD or context. Write a PRD first.{RESET}")
             return False
-        if not continue_to_panel:
-            return True
-        # prd_content is set, prd_file was written by _scratch_flow()
+        else:
+            prd_content, continue_to_panel = _scratch_flow(existing_context, skill=skill)
+            if not prd_content:
+                return False
+            if not continue_to_panel:
+                return True
+            # prd_content is set, prd_file was written by _scratch_flow()
     else:
         prd_content = prd_file.read_text(encoding="utf-8").strip()
 
@@ -1590,6 +1619,7 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         max_questions=6,
         ensure_tech=False,
         ensure_design=True,
+        auto_mode=auto_mode,
     )
 
     round_data.append({
@@ -1627,7 +1657,8 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         print(f"  {DIM}... ({len(preview_lines) - 40} more lines){RESET}")
     print()
 
-    what_enriched = _interactive_prd_edit(what_enriched)
+    if not auto_mode:
+        what_enriched = _interactive_prd_edit(what_enriched)
 
     # ════════════════════════════════════════════════════════════════
     #  ROUND 2 — HOW (Technical / Feasibility)
@@ -1648,6 +1679,7 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
         max_questions=7,
         ensure_tech=True,
         ensure_design=False,
+        auto_mode=auto_mode,
     )
 
     round_data.append({
@@ -1710,7 +1742,8 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False) -> bool:
     print()
 
     # ── Final interactive edit / confirm ──
-    enriched_prd = _interactive_prd_edit(enriched_prd)
+    if not auto_mode:
+        enriched_prd = _interactive_prd_edit(enriched_prd)
     prd_file.write_text(enriched_prd + "\n", encoding="utf-8")
     print(f"\n  {GREEN}✔ PRD saved to {prd_file}{RESET}")
 

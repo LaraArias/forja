@@ -346,8 +346,12 @@ function buildPipeline() {
 function buildWorkflowPipeline() {
   const wp = D.workflow_phases || [];
   if (wp.length === 0) return '';
+  // Count completion
+  const done = wp.filter(p => p.status === 'done').length;
+  const pct = wp.length > 0 ? Math.round(done / wp.length * 100) : 0;
   let html = '<div class="section"><div class="section-title">Workflow Pipeline</div>';
-  html += '<div class="panel"><div class="wf-pipeline">';
+  html += `<div class="panel"><p style="color:var(--dim);font-size:.8rem;margin-bottom:12px">${done}/${wp.length} phases complete (${pct}%)</p>`;
+  html += '<div class="wf-pipeline">';
   for (let i = 0; i < wp.length; i++) {
     const p = wp[i];
     const cls = p.status==='done'?'wf-done':p.status==='active'?'wf-active':p.status==='blocked'?'wf-blocked':'';
@@ -355,7 +359,8 @@ function buildWorkflowPipeline() {
     const icon = p.status==='done'?'&#10003;':p.status==='active'?'&#9881;':p.status==='blocked'?'&#9888;':'&#9675;';
     html += `<div class="wf-node ${cls}">`;
     html += `<div class="wf-order">Phase ${p.order}</div>`;
-    html += `<div class="wf-agent" style="color:${color}">${icon} ${esc(p.agent)}</div>`;
+    html += `<div class="wf-agent" style="color:${color}">${icon} ${esc(p.role || p.agent)}</div>`;
+    html += `<div style="font-size:.7rem;color:var(--dim)">${esc(p.agent)}</div>`;
     if (p.output) html += `<div class="wf-output">${esc(p.output)}</div>`;
     html += '</div>';
     if (i < wp.length - 1) html += '<div class="wf-arrow">&#8594;</div>';
@@ -436,7 +441,7 @@ function buildBuildDetails() {
     html += '</tbody></table></div></div>';
   }
 
-  // Roadmap (merged from old buildRoadmap)
+  // Roadmap (merged from old buildRoadmap) — expandable feature cards
   const rm = D.roadmap || [];
   if (rm.length > 0) {
     html += '<div style="margin-top:20px"><div class="panel">';
@@ -448,14 +453,27 @@ function buildBuildDetails() {
       html += `<span style="font-weight:600;color:var(--text)">${esc(tm.teammate)}</span>`;
       html += `<span style="font-size:.8rem;color:var(--dim)">${tm.passed}/${tm.total} (${tmPct}%)</span>`;
       html += `</div>`;
-      html += `<div style="display:flex;gap:6px;flex-wrap:wrap">`;
       for (const feat of tm.features) {
         const colors = {'passed':'#22c55e','failed':'#ef4444','blocked':'#f59e0b','pending':'#334155'};
         const bg = colors[feat.status] || '#334155';
         const textColor = feat.status === 'pending' ? 'var(--dim)' : '#fff';
-        html += `<div title="${esc(feat.description)}" style="background:${bg};color:${textColor};padding:4px 10px;border-radius:6px;font-size:.75rem;font-weight:600;cursor:default;white-space:nowrap">${esc(feat.id)}</div>`;
+        const cycles = feat.cycles || 0;
+        const cycleLabel = cycles === 1 ? '1 cycle' : `${cycles} cycles`;
+        html += `<details style="margin-bottom:4px;border-left:3px solid ${bg};padding-left:10px">`;
+        html += `<summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:4px 0">`;
+        html += `<span style="background:${bg};color:${textColor};padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:600;white-space:nowrap">${esc(feat.id)}</span>`;
+        html += `<span style="font-size:.8rem;color:var(--text);flex:1">${esc(feat.description)}</span>`;
+        html += `<span style="font-size:.7rem;color:var(--dim);white-space:nowrap">${cycleLabel}</span>`;
+        html += `</summary>`;
+        html += `<div style="padding:6px 0 6px 20px;font-size:.78rem;color:var(--dim)">`;
+        html += `<div>Status: <strong style="color:${bg}">${feat.status}</strong> &middot; ${cycleLabel}</div>`;
+        if (feat.evidence) html += `<div style="margin-top:3px">Evidence: ${esc(feat.evidence)}</div>`;
+        if (feat.created_at) html += `<div>Created: ${feat.created_at.slice(0,19)}</div>`;
+        if (feat.passed_at) html += `<div>Passed: ${feat.passed_at.slice(0,19)}</div>`;
+        if (feat.blocked_at) html += `<div>Blocked: ${feat.blocked_at.slice(0,19)}</div>`;
+        html += `</div></details>`;
       }
-      html += `</div></div>`;
+      html += `</div>`;
     }
     html += '</div></div>';
   }

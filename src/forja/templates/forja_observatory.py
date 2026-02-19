@@ -217,28 +217,65 @@ def _read_git_log():
 
 
 def _read_src_stats():
-    """Count files and lines in src/ by extension."""
+    """Count files and lines of code in the project.
+
+    Searches multiple common locations: ``src/``, ``app/``, ``lib/``,
+    and the project root.  Skips hidden dirs, ``node_modules``,
+    ``__pycache__``, ``.forja*``, ``venv``, ``.git``, etc. so only
+    user-authored code is counted.
+    """
     stats = {}
     total_lines = 0
     total_files = 0
-    src = Path("src")
-    if not src.is_dir():
-        return stats, total_files, total_lines
-    for fpath in src.rglob("*"):
-        if not fpath.is_file():
-            continue
-        ext = fpath.suffix or "no-ext"
-        if ext in (".pyc", ".pyo"):
-            continue
-        total_files += 1
-        stats.setdefault(ext, {"files": 0, "lines": 0})
-        stats[ext]["files"] += 1
-        try:
-            line_count = len(fpath.read_text(encoding="utf-8", errors="replace").splitlines())
-            stats[ext]["lines"] += line_count
-            total_lines += line_count
-        except OSError as exc:
-            print(f"  could not count lines in {fpath}: {exc}", file=sys.stderr)
+
+    CODE_EXTENSIONS = {
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".scss",
+        ".go", ".rs", ".java", ".c", ".cpp", ".h", ".rb", ".php",
+        ".swift", ".kt", ".sh", ".sql", ".vue", ".svelte",
+    }
+    SKIP_DIRS = {
+        "node_modules", "__pycache__", ".git", ".forja", ".forja-tools",
+        "venv", ".venv", "env", ".env", ".tox", ".mypy_cache",
+        ".pytest_cache", "dist", "build", ".next", "coverage",
+        "context", ".forja-global",
+    }
+
+    # Collect candidate roots: prefer structured dirs, fallback to project root
+    roots: list[Path] = []
+    for candidate in ("src", "app", "lib", "server", "client", "backend", "frontend"):
+        p = Path(candidate)
+        if p.is_dir():
+            roots.append(p)
+    # If no structured dirs, scan project root (only top-level code files + subdirs)
+    if not roots:
+        roots.append(Path("."))
+
+    seen: set[Path] = set()
+    for root in roots:
+        for fpath in root.rglob("*"):
+            if not fpath.is_file():
+                continue
+            # Skip hidden and irrelevant directories
+            parts = fpath.parts
+            if any(p.startswith(".") or p in SKIP_DIRS for p in parts[:-1]):
+                continue
+            # Only count code files
+            ext = fpath.suffix.lower()
+            if ext not in CODE_EXTENSIONS:
+                continue
+            resolved = fpath.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            total_files += 1
+            stats.setdefault(ext, {"files": 0, "lines": 0})
+            stats[ext]["files"] += 1
+            try:
+                line_count = len(fpath.read_text(encoding="utf-8", errors="replace").splitlines())
+                stats[ext]["lines"] += line_count
+                total_lines += line_count
+            except OSError as exc:
+                print(f"  could not count lines in {fpath}: {exc}", file=sys.stderr)
     return stats, total_files, total_lines
 
 
@@ -299,9 +336,22 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
         sr_status = "fail"
 
     # ── Plan Mode ──
-    plan_experts = plan_transcript.get("experts", []) if plan_transcript else []
-    plan_questions = plan_transcript.get("questions", []) if plan_transcript else []
-    plan_answers = plan_transcript.get("answers", []) if plan_transcript else []
+    # plan-transcript.json uses {"rounds": [{"experts":[], "questions":[], "answers":[]}]}
+    plan_experts = []
+    plan_questions = []
+    plan_answers = []
+    if plan_transcript:
+        for round_data in plan_transcript.get("rounds", []):
+            plan_experts.extend(round_data.get("experts", []))
+            plan_questions.extend(round_data.get("questions", []))
+            plan_answers.extend(round_data.get("answers", []))
+        # Fallback: top-level keys (legacy format)
+        if not plan_experts:
+            plan_experts = plan_transcript.get("experts", [])
+        if not plan_questions:
+            plan_questions = plan_transcript.get("questions", [])
+        if not plan_answers:
+            plan_answers = plan_transcript.get("answers", [])
     plan_facts = sum(1 for a in plan_answers if a.get("tag") == "FACT")
     plan_decisions = sum(1 for a in plan_answers if a.get("tag") == "DECISION")
     plan_assumptions = sum(1 for a in plan_answers if a.get("tag") == "ASSUMPTION")
@@ -357,7 +407,16 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
         roadmap.append({
             "teammate": name,
             "features": [
-                {"id": f.id or "?", "description": f.description, "status": f.status}
+                {
+                    "id": f.id or "?",
+                    "description": f.description,
+                    "status": f.status,
+                    "cycles": f.cycles,
+                    "evidence": getattr(f, "evidence", "") or "",
+                    "created_at": f.created_at or "",
+                    "passed_at": f.passed_at or "",
+                    "blocked_at": getattr(f, "blocked_at", "") or "",
+                }
                 for f in feats
             ],
             "passed": sum(1 for f in feats if f.status == "passed"),

@@ -232,10 +232,76 @@ def _format_duration(seconds):
     return f"{s}s"
 
 
+def _detect_entry_point() -> str:
+    """Detect how to run the built project. Returns a shell command or empty string."""
+    cwd = Path.cwd()
+
+    # Check package.json for scripts
+    pkg_json = cwd / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+            scripts = pkg.get("scripts", {})
+            if "start" in scripts:
+                return "npm start"
+            if "dev" in scripts:
+                return "npm run dev"
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Python entry points (order matters: main.py > app.py > manage.py > run.py)
+    for name in ("main.py", "app.py", "run.py"):
+        if (cwd / name).exists():
+            return f"python {name}"
+    if (cwd / "manage.py").exists():
+        return "python manage.py runserver"
+
+    # Check for index.html (static site)
+    if (cwd / "index.html").exists():
+        return "open index.html"
+
+    # Check for src/ entry points
+    for name in ("main.py", "app.py"):
+        if (cwd / "src" / name).exists():
+            return f"python src/{name}"
+
+    # Check pyproject.toml for scripts
+    pyproject = cwd / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            text = pyproject.read_text(encoding="utf-8")
+            if "[project.scripts]" in text:
+                # Extract first script name
+                in_scripts = False
+                for line in text.splitlines():
+                    if "[project.scripts]" in line:
+                        in_scripts = True
+                        continue
+                    if in_scripts and "=" in line and not line.strip().startswith("["):
+                        script_name = line.split("=")[0].strip().strip('"')
+                        return f"pip install -e . && {script_name}"
+                    if in_scripts and line.strip().startswith("["):
+                        break
+        except OSError:
+            pass
+
+    # Check for Makefile with run target
+    if (cwd / "Makefile").exists():
+        try:
+            text = (cwd / "Makefile").read_text(encoding="utf-8")
+            if "run:" in text:
+                return "make run"
+        except OSError:
+            pass
+
+    return ""
+
+
 def _phase_header(num, name, total=5):
-    """Print phase header with timestamp."""
+    """Print phase header with timestamp and emit start event."""
     ts = time.strftime("%H:%M:%S")
     print(f"\n{BOLD}{CYAN}  Phase {num}/{total}: {name}{RESET} {DIM}[{ts}]{RESET}")
+    _emit_event("phase.start", {"phase": name, "phase_num": num, "total_phases": total})
 
 
 def _phase_result(passed, message):
@@ -2522,10 +2588,12 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
     # ── Phase 0: Spec Review (informational + enrich) ──
     _phase_header(0, "Spec Review", 8)
     _run_spec_review(str(prd))
+    _emit_event("phase.complete", {"phase": "Spec Review", "success": True})
 
     # ── Phase 1: Context Injection ──
     _phase_header(1, "Context Injection", 8)
     _inject_context_into_claude_md()
+    _emit_event("phase.complete", {"phase": "Context Injection", "success": True})
 
     # ── Workflow-based features (when workflow.json exists) ──
     if WORKFLOW_PATH.exists():
@@ -2689,30 +2757,36 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
             p_rate >= 70,
             f"{color}{p_rate:.0f}% endpoints verified{RESET} ({p_passed}/{p_total} probes passed)",
         )
+    _emit_event("phase.complete", {"phase": "Smoke Test", "success": smoke_result["passed"]})
 
     # ── Phase 4: Project Tests (informational) ──
     _phase_header(4, "Project Tests", 8)
     test_results = _run_project_tests(Path.cwd())
     _log_test_failures_as_learnings(test_results)
+    _emit_event("phase.complete", {"phase": "Project Tests", "success": test_results.get("exit_code", -1) == 0})
 
     # ── Phase 5: Visual Evaluation (informational) ──
     _phase_header(5, "Visual Evaluation", 8)
     _run_visual_eval(str(prd))
+    _emit_event("phase.complete", {"phase": "Visual Evaluation", "success": True})
 
     # ── Phase 6: Outcome Evaluation (informational) ──
     _phase_header(6, "Outcome Evaluation", 8)
     _run_outcome(str(prd))
     _persist_outcome_gaps()
+    _emit_event("phase.complete", {"phase": "Outcome Evaluation", "success": True})
 
     # ── Phase 7: Extract Learnings (informational) ──
     _phase_header(7, "Extract Learnings", 8)
     _run_learnings_extract()
     _run_learnings_apply()
     _run_learnings_synthesize()
+    _emit_event("phase.complete", {"phase": "Extract Learnings", "success": True})
 
     # ── Phase 8: Observatory (informational) ──
     _phase_header(8, "Observatory Report", 8)
     _run_observatory()
+    _emit_event("phase.complete", {"phase": "Observatory Report", "success": True})
 
     # ── Save iteration changelog ──
     _save_iteration_log(pipeline_start, total, passed, blocked, build_elapsed)
@@ -2751,6 +2825,13 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
         feat_summary += f"{RESET}"
         print(feat_summary)
     print()
+    # ── Detect entry point and show how to run ──
+    entry_point = _detect_entry_point()
+    if entry_point:
+        print(f"  {BOLD}How to run:{RESET}")
+        print(f"    {GREEN}{entry_point}{RESET}")
+        print()
+
     if build_ok:
         print(f"  Next steps:")
         print(f"    forja status    - feature details")
@@ -3353,8 +3434,35 @@ def _evaluate_quality_gates(
     else:
         probes_ok = True  # No probes = gate does not apply
 
+    # ── Verification Completeness ──
+    # Track which gates were actually verified vs skipped
+    smoke_skipped = not (smoke_has_report and smoke_report.get("port", 0) > 0)
+    tests_skipped = not (cfg.build.quality_tests_pass and test_framework)
+    visual_skipped = visual_score < 0
+    probes_skipped = probe_total == 0
+
+    total_gates = 6  # smoke, coverage, tests, features, visual, probes
+    skipped_gates = sum([smoke_skipped, tests_skipped, visual_skipped, probes_skipped])
+    verified_gates = total_gates - skipped_gates
+    verification_pct = int(verified_gates / total_gates * 100) if total_gates > 0 else 0
+
+    # all_pass is TRUE only when verified gates pass AND at least 2 gates were actually tested
+    verified_all_pass = coverage_ok and tests_ok and features_ok and visual_ok and smoke_ok and probes_ok
+
     return {
-        "all_pass": coverage_ok and tests_ok and features_ok and visual_ok and smoke_ok and probes_ok,
+        "all_pass": verified_all_pass,
+        "verification_completeness": {
+            "total_gates": total_gates,
+            "verified": verified_gates,
+            "skipped": skipped_gates,
+            "pct": verification_pct,
+            "skipped_names": [
+                name for name, skipped in [
+                    ("smoke", smoke_skipped), ("tests", tests_skipped),
+                    ("visual", visual_skipped), ("probes", probes_skipped),
+                ] if skipped
+            ],
+        },
         "coverage": {
             "value": coverage_val,
             "target": cov_threshold,
@@ -3367,6 +3475,7 @@ def _evaluate_quality_gates(
             "framework": test_framework,
             "required": cfg.build.quality_tests_pass,
             "gate_passed": tests_ok,
+            "skipped": tests_skipped,
         },
         "features": {
             "total": total,
@@ -3382,6 +3491,7 @@ def _evaluate_quality_gates(
             "passed": visual_ok,
             "has_report": visual_score >= 0,
             "issues": visual_issues[:10],
+            "skipped": visual_skipped,
         },
         "smoke": {
             "passed": smoke_ok,
@@ -3389,6 +3499,7 @@ def _evaluate_quality_gates(
             "server_started": smoke_server_started,
             "checks": smoke_checks,
             "error": smoke_error,
+            "skipped": smoke_skipped,
         },
         "probes": {
             "total": probe_total,
@@ -3397,6 +3508,7 @@ def _evaluate_quality_gates(
             "target": probe_threshold,
             "gate_passed": probes_ok,
             "failed_endpoints": probe_failed_endpoints[:10],
+            "skipped": probes_skipped,
         },
         "unmet": unmet,
     }
@@ -3408,53 +3520,59 @@ def _print_gate_results(gates: dict, iteration: int) -> None:
 
     # Smoke test gate
     smoke = gates.get("smoke", {})
-    if smoke.get("has_report") and smoke.get("server_started") is not None:
-        if not smoke.get("checks") and not smoke.get("error"):
-            print(f"    {DIM}─ Smoke: no server to test{RESET}")
-        elif smoke.get("passed"):
-            ok_checks = sum(1 for c in smoke.get("checks", []) if c.get("ok"))
-            total_checks = len(smoke.get("checks", []))
-            print(f"    {GREEN}✓{RESET} Smoke: server healthy ({ok_checks}/{total_checks} endpoints OK)")
-        else:
-            err = smoke.get("error", "server not healthy")[:60]
-            print(f"    {RED}✗{RESET} Smoke: {err}")
+    if smoke.get("skipped", True):
+        print(f"    {DIM}⊖ Smoke: not evaluated (no server detected){RESET}")
+    elif smoke.get("passed"):
+        ok_checks = sum(1 for c in smoke.get("checks", []) if c.get("ok"))
+        total_checks = len(smoke.get("checks", []))
+        print(f"    {GREEN}✓{RESET} Smoke: server healthy ({ok_checks}/{total_checks} endpoints OK)")
     else:
-        print(f"    {DIM}─ Smoke: not evaluated{RESET}")
+        err = smoke.get("error", "server not healthy")[:60]
+        print(f"    {RED}✗{RESET} Smoke: {err}")
 
     cov = gates["coverage"]
     mark = f"{GREEN}✓{RESET}" if cov["passed"] else f"{RED}✗{RESET}"
     print(f"    {mark} Coverage: {cov['value']}% (target: {cov['target']}%)")
 
     tst = gates["tests"]
-    if tst["framework"]:
-        mark = f"{GREEN}✓{RESET}" if tst["gate_passed"] else f"{RED}✗{RESET}"
-        print(f"    {mark} Tests: {tst['passed']} passed, {tst['failed']} failed ({tst['framework']})")
+    if tst.get("skipped", False):
+        print(f"    {DIM}⊖ Tests: not evaluated (no test suite detected){RESET}")
+    elif tst["gate_passed"]:
+        print(f"    {GREEN}✓{RESET} Tests: {tst['passed']} passed, {tst['failed']} failed ({tst['framework']})")
     else:
-        print(f"    {DIM}─ Tests: no test suite detected{RESET}")
+        print(f"    {RED}✗{RESET} Tests: {tst['passed']} passed, {tst['failed']} failed ({tst['framework']})")
 
     feat = gates["features"]
     if feat["total"] > 0:
         mark = f"{GREEN}✓{RESET}" if feat["gate_passed"] else f"{RED}✗{RESET}"
         print(f"    {mark} Features: {feat['passed']}/{feat['total']} ({feat['pct']}%)")
     else:
-        print(f"    {DIM}─ Features: none tracked{RESET}")
+        print(f"    {DIM}⊖ Features: none tracked{RESET}")
 
     vis = gates.get("visual", {})
-    if vis.get("has_report"):
-        mark = f"{GREEN}✓{RESET}" if vis["passed"] else f"{RED}✗{RESET}"
-        print(f"    {mark} Visual: {vis['score']}/100 (target: {vis['target']})")
+    if vis.get("skipped", False):
+        print(f"    {DIM}⊖ Visual: not evaluated (no screenshots){RESET}")
+    elif vis["passed"]:
+        print(f"    {GREEN}✓{RESET} Visual: {vis['score']}/100 (target: {vis['target']})")
     else:
-        print(f"    {DIM}─ Visual: no screenshots evaluated{RESET}")
+        print(f"    {RED}✗{RESET} Visual: {vis['score']}/100 (target: {vis['target']})")
 
     probes = gates.get("probes", {})
-    if probes.get("total", 0) > 0:
-        mark = f"{GREEN}✓{RESET}" if probes["gate_passed"] else f"{RED}✗{RESET}"
-        print(f"    {mark} Probes: {probes['pass_rate']:.0f}% ({probes['passed']}/{probes['total']} endpoints, target: {probes['target']}%)")
-        if not probes["gate_passed"] and probes.get("failed_endpoints"):
+    if probes.get("skipped", False):
+        print(f"    {DIM}⊖ Probes: not evaluated (no endpoints detected){RESET}")
+    elif probes["gate_passed"]:
+        print(f"    {GREEN}✓{RESET} Probes: {probes['pass_rate']:.0f}% ({probes['passed']}/{probes['total']} endpoints, target: {probes['target']}%)")
+    else:
+        print(f"    {RED}✗{RESET} Probes: {probes['pass_rate']:.0f}% ({probes['passed']}/{probes['total']} endpoints, target: {probes['target']}%)")
+        if probes.get("failed_endpoints"):
             for ep in probes["failed_endpoints"][:3]:
                 print(f"      {RED}└ {ep}{RESET}")
-    else:
-        print(f"    {DIM}─ Probes: no endpoints to probe{RESET}")
+
+    # Verification completeness
+    vc = gates.get("verification_completeness", {})
+    if vc.get("skipped", 0) > 0:
+        skipped_names = ", ".join(vc.get("skipped_names", []))
+        print(f"    {YELLOW}⚠ Verification: {vc['verified']}/{vc['total_gates']} gates verified ({vc['pct']}%) — skipped: {skipped_names}{RESET}")
 
     if gates["unmet"]:
         preview = ", ".join(str(r)[:40] for r in gates["unmet"][:3])
