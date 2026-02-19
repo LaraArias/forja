@@ -27,6 +27,7 @@ from forja.config import run_config
 from forja.constants import PRD_PATH
 from forja.init import run_init
 from forja.planner import run_plan
+from forja.projects import run_projects
 from forja.runner import run_auto_forja, run_forja, run_iterate
 from forja.status import show_status
 from forja.utils import VERSION, setup_logging
@@ -45,6 +46,7 @@ Commands:
   forja status          Show feature progress during or after a build
   forja report          Open the observatory dashboard in your browser
   forja audit           Show decision audit trail (decisions, facts, assumptions)
+  forja projects        Manage and monitor multiple projects
   forja config          Configure API keys
   forja plan            Run Plan Mode standalone (expert panel + PRD generation)
   forja init --upgrade  Update templates without touching context
@@ -136,6 +138,17 @@ def cmd_audit(args: argparse.Namespace) -> None:
     sys.exit(result.returncode)
 
 
+def cmd_projects(args: argparse.Namespace) -> None:
+    """Manage and monitor Forja projects."""
+    action = args.action or "ls"
+    success = run_projects(
+        action=action,
+        path=args.path,
+        name=args.name,
+    )
+    sys.exit(0 if success else 1)
+
+
 def cmd_help(args: argparse.Namespace) -> None:
     """Show help text."""
     print(HELP_TEXT)
@@ -207,6 +220,23 @@ def main() -> None:
                          choices=["DECISION", "FACT", "ASSUMPTION", "OBSERVATION"],
                          help="Filter by entry type")
     p_audit.set_defaults(func=cmd_audit)
+
+    # projects
+    p_projects = subparsers.add_parser("projects", help="Manage and monitor projects")
+    p_projects.add_argument(
+        "action", nargs="?", default=None,
+        choices=["ls", "list", "add", "remove", "select", "show"],
+        help="Action: ls (default), add, remove, select, show",
+    )
+    p_projects.add_argument(
+        "path", nargs="?", default=None,
+        help="Path (for add) or project name (for select/remove)",
+    )
+    p_projects.add_argument(
+        "--name", "-n", default=None,
+        help="Alias for the project (default: directory name)",
+    )
+    p_projects.set_defaults(func=cmd_projects)
 
     # help
     p_help = subparsers.add_parser("help", help="Show this help text")

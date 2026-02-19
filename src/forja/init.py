@@ -397,7 +397,11 @@ def run_init(directory: str = ".", force: bool = False, upgrade: bool = False) -
     print()
     print(f"{PASS_ICON} Forja initialized.")
 
-    # Step 9: Auto-launch planning
+    # Step 9: Register in global project registry
+    from forja.projects import auto_register  # local import to avoid circular dep
+    auto_register(target)
+
+    # Step 10: Auto-launch planning
     from forja.planner import run_plan  # local import to avoid circular dep
 
     print(f"\n{BOLD}── Starting Plan Mode ──{RESET}\n")
