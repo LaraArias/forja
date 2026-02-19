@@ -1501,6 +1501,94 @@ def _run_endpoint_probes(port: int) -> dict:
     return trace
 
 
+def _run_cli_qa() -> dict | None:
+    """Run CLI QA tests for non-server projects (Python scripts, CLI tools).
+
+    Uses .forja-tools/forja_qa_cli.py to run subprocess-based checks:
+      - Entry point exists
+      - Syntax check
+      - Import check
+      - Help/version flag
+      - Starts without crash
+      - No import errors
+
+    Returns result dict or None if no CLI entry point detected.
+    """
+    qa_script = FORJA_TOOLS / "forja_qa_cli.py"
+    if not qa_script.exists():
+        # Try syncing from templates
+        template_src = Path(__file__).parent / "templates" / "forja_qa_cli.py"
+        if template_src.exists():
+            FORJA_TOOLS.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(template_src, qa_script)
+        else:
+            return None
+
+    # Detect if there's a CLI entry point
+    entry_point = _detect_entry_point()
+    if not entry_point:
+        return None
+
+    # Skip if entry point is clearly a web thing
+    if entry_point in ("open index.html",) or entry_point.startswith("npm"):
+        return None
+
+    print(f"  Running CLI QA for: {BOLD}{entry_point}{RESET}")
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(qa_script), entry_point, str(FORJA_DIR)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        # Parse the JSON report
+        report_path = FORJA_DIR / "qa-cli-report.json"
+        if report_path.exists():
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                passed_count = report.get("passed", 0)
+                failed_count = report.get("failed", 0)
+                total = passed_count + failed_count
+
+                all_passed = failed_count == 0
+                summary = f"CLI QA: {passed_count}/{total} checks passed"
+
+                if all_passed:
+                    _phase_result(True, f"{GREEN}{summary}{RESET}")
+                else:
+                    _phase_result(False, f"{RED}{summary}{RESET}")
+                    # Show which tests failed
+                    for test in report.get("tests", []):
+                        if not test.get("passed"):
+                            print(f"    {RED}✘{RESET} {test['name']}: {test.get('detail', '')[:80]}")
+
+                return {
+                    "passed": all_passed,
+                    "summary": summary,
+                    "tests": report.get("tests", []),
+                    "entry_point": entry_point,
+                }
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug("Failed to parse CLI QA report: %s", exc)
+
+        # Fallback: use exit code
+        passed = result.returncode == 0
+        return {
+            "passed": passed,
+            "summary": f"CLI QA {'passed' if passed else 'failed'} (exit {result.returncode})",
+            "entry_point": entry_point,
+        }
+
+    except subprocess.TimeoutExpired:
+        print(f"  {YELLOW}CLI QA timed out after 120s{RESET}")
+        return {"passed": False, "summary": "CLI QA timed out", "entry_point": entry_point}
+    except Exception as exc:
+        logger.debug("CLI QA error: %s", exc)
+        return None
+
+
 def _run_smoke_test() -> dict:
     """Run server health smoke test: start the app, verify HTTP responses.
 
@@ -1531,10 +1619,17 @@ def _run_smoke_test() -> dict:
     result["port"] = config.get("port", 0)
 
     if not config.get("start_cmd") and not config.get("port"):
-        result["summary"] = "No server configuration detected"
-        result["passed"] = True  # Non-server projects pass by default
+        # No server detected — run CLI QA instead of skipping
+        cli_qa_result = _run_cli_qa()
+        if cli_qa_result:
+            result["passed"] = cli_qa_result.get("passed", False)
+            result["summary"] = cli_qa_result.get("summary", "CLI QA ran")
+            result["cli_qa"] = cli_qa_result
+        else:
+            result["summary"] = "No server configuration detected"
+            result["passed"] = True  # Non-server, non-CLI projects pass by default
+            print(f"  {DIM}skipped (no server to test for {config['skill']}){RESET}")
         _save_smoke_result(result)
-        print(f"  {DIM}skipped (no server to test for {config['skill']}){RESET}")
         return result
 
     server_proc = None
@@ -2415,7 +2510,12 @@ def _release_pid_lock():
 
 
 def _auto_open_output():
-    """Open the observatory dashboard and project output in the browser."""
+    """Open the observatory dashboard and project output in the browser.
+
+    Smart detection: for CLI/Python projects, only opens the observatory
+    and shows the run command in the terminal.  For web projects, opens
+    the HTML output too.
+    """
     import socket
     import webbrowser
 
@@ -2427,7 +2527,8 @@ def _auto_open_output():
         webbrowser.open(f"file://{observatory_html.resolve()}")
         print(f"\n  {GREEN}Observatory dashboard opened{RESET}")
 
-    # Then open the project output
+    # Detect entry point to decide what to open
+    entry_point = _detect_entry_point()
     skill = _detect_skill()
 
     if skill == "landing-page":
@@ -2465,15 +2566,24 @@ def _auto_open_output():
         return
 
     else:
-        # Custom / unknown — try common output files
+        # Smart detection: only open HTML if the project IS a web project
+        # For CLI apps (main.py, app.py, etc.), don't open random HTML
+        has_web_output = False
         for name in ("index.html", "dist/index.html", "build/index.html",
                       "out/index.html", "public/index.html"):
             p = Path(name)
             if p.exists():
+                has_web_output = True
                 url = f"file://{p.resolve()}"
                 print(f"  {GREEN}Opening {name} in browser...{RESET}")
                 webbrowser.open(url)
                 return
+
+        # CLI project: don't try to open HTML, just show how to run
+        if not has_web_output and entry_point:
+            print(f"\n  {CYAN}This is a terminal project. Run it with:{RESET}")
+            print(f"    {BOLD}{entry_point}{RESET}")
+            return
 
 
 def run_forja(prd_path: str | None = None, *, preserve_build: bool = False) -> bool:

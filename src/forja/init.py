@@ -43,6 +43,7 @@ TEMPLATES = [
     ("forja_outcome.py", ".forja-tools/forja_outcome.py"),
     ("forja_learnings.py", ".forja-tools/forja_learnings.py"),
     ("forja_qa_playwright.py", ".forja-tools/forja_qa_playwright.py"),
+    ("forja_qa_cli.py", ".forja-tools/forja_qa_cli.py"),
     ("forja_visual_eval.py", ".forja-tools/forja_visual_eval.py"),
     ("forja_handoff.py", ".forja-tools/forja_handoff.py"),
     ("forja.toml.default", "forja.toml"),

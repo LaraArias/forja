@@ -279,6 +279,58 @@ def _read_src_stats():
     return stats, total_files, total_lines
 
 
+# ── Project type detection ────────────────────────────────────────────
+
+def _detect_project_run_info():
+    """Detect project type and how to run it.
+
+    Returns a dict with ``project_type``, ``run_command``, and ``run_label``.
+    """
+    # Check package.json for scripts
+    pkg_json = Path("package.json")
+    if pkg_json.exists():
+        try:
+            pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+            scripts = pkg.get("scripts", {})
+            if "start" in scripts:
+                return {"project_type": "node", "run_command": "npm start", "run_label": "Node.js App"}
+            if "dev" in scripts:
+                return {"project_type": "node", "run_command": "npm run dev", "run_label": "Node.js App (dev)"}
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Python entry points
+    for name, label in [
+        ("main.py", "Python App"),
+        ("app.py", "Python App"),
+        ("run.py", "Python Script"),
+    ]:
+        if Path(name).exists():
+            return {"project_type": "python-cli", "run_command": f"python3 {name}", "run_label": label}
+    if Path("manage.py").exists():
+        return {"project_type": "django", "run_command": "python3 manage.py runserver", "run_label": "Django App"}
+
+    # Static site
+    if Path("index.html").exists():
+        return {"project_type": "web", "run_command": "open index.html", "run_label": "Static Website"}
+
+    # Python src/ entry points
+    for name in ("main.py", "app.py"):
+        if (Path("src") / name).exists():
+            return {"project_type": "python-cli", "run_command": f"python3 src/{name}", "run_label": "Python App"}
+
+    # Makefile
+    if Path("Makefile").exists():
+        try:
+            text = Path("Makefile").read_text(encoding="utf-8")
+            if "run:" in text:
+                return {"project_type": "make", "run_command": "make run", "run_label": "Makefile Project"}
+        except OSError:
+            pass
+
+    return {"project_type": "unknown", "run_command": "", "run_label": ""}
+
+
 # ── Workflow helpers ─────────────────────────────────────────────────
 
 def _build_workflow_phases(workflow, per_teammate):
@@ -650,6 +702,8 @@ def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=
         "learnings_manifest": _read_learnings_manifest(),
         # Unified event stream
         "event_stream": m.get("event_stream", [])[:300],
+        # How to Run
+        **_detect_project_run_info(),
     }
 
 
