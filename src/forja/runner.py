@@ -50,18 +50,18 @@ MIN_REAL_CONTENT_CHARS = 50
 FALLBACK_ITERATION_EXPERTS = [
     {
         "name": "Build Failure Analyst",
-        "field": "Build Diagnostics & Debugging",
-        "perspective": "Analyzing why features failed and identifying root causes in the PRD.",
+        "field": "Build Diagnostics & Root Cause Analysis",
+        "perspective": "Analyzing why features failed and identifying what DETAIL is missing from the PRD.",
     },
     {
-        "name": "Scope Reduction Specialist",
-        "field": "MVP Scoping & Iterative Delivery",
-        "perspective": "Identifying what to simplify or remove so the next build succeeds.",
+        "name": "PRD Enrichment Specialist",
+        "field": "Specification Growth & Acceptance Criteria",
+        "perspective": "Adding specificity, edge cases, implementation notes, and acceptance criteria to make features buildable.",
     },
     {
         "name": "Dependency & Constraints Engineer",
         "field": "Build Tooling & Runtime Constraints",
-        "perspective": "Ensuring the PRD only requires tools Claude Code can actually use.",
+        "perspective": "Ensuring the PRD only requires tools Claude Code can actually use, and adding explicit constraints.",
     },
 ]
 
@@ -69,30 +69,30 @@ FALLBACK_ITERATION_QUESTIONS = [
     {
         "id": 1,
         "expert_name": "Build Failure Analyst",
-        "question": "Which failed features share a common root cause, and what PRD change would fix them?",
-        "why": "Fixing the root cause is more effective than patching individual failures.",
-        "default": "Group related failures and simplify: reduce feature count, merge overlapping features.",
+        "question": "Which failed features need MORE DETAIL in the PRD to build correctly?",
+        "why": "Most build failures come from vague descriptions. Adding specificity fixes them.",
+        "default": "Add file structure, function signatures, data formats, and step-by-step implementation notes to each failed feature.",
     },
     {
         "id": 2,
         "expert_name": "Build Failure Analyst",
-        "question": "Are any failed features blocked by dependencies on other failed features?",
-        "why": "Dependency chains cause cascading failures. Breaking the chain fixes multiple features.",
-        "default": "Make each feature independently buildable. Remove inter-feature dependencies.",
+        "question": "What acceptance criteria are missing that would prevent false-positive passes?",
+        "why": "Without clear acceptance criteria, features 'pass' but don't actually work.",
+        "default": "Add testable acceptance criteria: input/output examples, expected behaviors, error cases.",
     },
     {
         "id": 3,
-        "expert_name": "Scope Reduction Specialist",
-        "question": "Which features should be cut or simplified to increase the pass rate?",
-        "why": "A smaller scope that fully passes is better than an ambitious scope that half-fails.",
-        "default": "Cut the lowest-priority failed features. Focus on core functionality passing 100%.",
+        "expert_name": "PRD Enrichment Specialist",
+        "question": "Which features need edge cases, error handling, or validation rules documented?",
+        "why": "Edge cases not described in the PRD are edge cases that will fail at runtime.",
+        "default": "Document: input validation rules, error messages, boundary conditions, empty-state behaviors.",
     },
     {
         "id": 4,
-        "expert_name": "Scope Reduction Specialist",
-        "question": "Can any complex features be split into a simpler v1 and a deferred v2?",
-        "why": "Splitting reduces per-feature complexity, making each part more likely to pass.",
-        "default": "Split complex features: implement the data model first, UI second, integrations third.",
+        "expert_name": "PRD Enrichment Specialist",
+        "question": "What data structures, file layouts, or API contracts should be explicitly defined?",
+        "why": "Explicit contracts prevent the builder from guessing wrong about interfaces.",
+        "default": "Define: JSON schemas, function signatures, file paths, class hierarchies, module dependencies.",
     },
     {
         "id": 5,
@@ -104,9 +104,9 @@ FALLBACK_ITERATION_QUESTIONS = [
     {
         "id": 6,
         "expert_name": "Dependency & Constraints Engineer",
-        "question": "Are the build instructions clear enough for an automated agent to follow?",
-        "why": "Ambiguous PRD instructions lead to incorrect implementations that fail validation.",
-        "default": "Add explicit file paths, function signatures, and expected response formats to the PRD.",
+        "question": "Are the build instructions clear enough for an automated agent to follow without guessing?",
+        "why": "Ambiguous instructions lead to incorrect implementations that fail validation.",
+        "default": "Add explicit file paths, function signatures, expected response formats, and build order to the PRD.",
     },
 ]
 
@@ -2088,6 +2088,18 @@ def _run_iteration_expert_panel(
         context_parts.append(f"## Iteration Changelogs (most recent first)\n{changelogs}")
     context_parts.append(f"## Build Results\n{iteration_context}")
     context_parts.append(f"## User Feedback\n{user_feedback}")
+
+    # Include accumulated decision history so experts know what's already decided
+    decision_history = _load_decision_history()
+    if decision_history:
+        history_text = "## Previous Decisions (already applied — do not re-litigate)\n"
+        for h in decision_history[-15:]:
+            history_text += (
+                f"- [iter {h.get('iteration', '?')}] [{h.get('type', '?').upper()}] "
+                f"{h.get('target', '?')}: {h.get('decision', '')[:100]}\n"
+            )
+        context_parts.append(history_text)
+
     full_context = "\n\n".join(context_parts)
 
     # 4. Build iteration-specific panel prompt
@@ -2095,20 +2107,21 @@ def _run_iteration_expert_panel(
         "You are a conductor of expertise bringing together ITERATION REVIEW experts "
         "to analyze a software PRD that has gone through one or more build attempts.\n\n"
         "The project has already been built at least once. Some features passed, some failed. "
-        "Your experts must analyze WHY features failed and recommend concrete PRD changes.\n\n"
+        "Your experts must analyze WHY features failed and recommend concrete PRD ENRICHMENTS.\n\n"
         "Generate 2-3 experts for this iteration review. Focus on:\n"
-        "- Build failure diagnosis: why did specific features fail?\n"
-        "- Scope reduction: what should be simplified or removed?\n"
-        "- Dependency issues: what build constraints were violated?\n"
-        "- Incremental progress: what can be fixed in the next run?\n\n"
+        "- Build failure diagnosis: why did specific features fail? What detail was missing?\n"
+        "- PRD enrichment: what specificity, acceptance criteria, or constraints should be ADDED?\n"
+        "- Dependency issues: what build constraints should be documented?\n"
+        "- Implementation detail: what file structures, function signatures, or data formats should be specified?\n\n"
         "Each expert should:\n"
         "1. Review the build results and failed features\n"
-        "2. Ask ONE critical question about what to change in the PRD\n"
-        "3. Suggest a concrete default answer based on the failure patterns\n\n"
-        "CRITICAL: Experts should be PRAGMATIC. The goal is a PRD that builds "
-        "successfully on the next attempt, not a perfect PRD. Prefer scope reduction "
-        "over adding complexity.\n\n"
-        "CRITICAL: Default answers must be actionable PRD changes, not vague advice.\n\n"
+        "2. Ask ONE critical question about what DETAIL to ADD to the PRD\n"
+        "3. Suggest a concrete default that ADDS specificity (not removes features)\n\n"
+        "CRITICAL: The PRD should GROW with each iteration. When a feature failed, "
+        "the first response is to ADD detail about HOW it should be built — not to remove it. "
+        "Only recommend descoping when something is fundamentally impossible to build "
+        "in this environment (e.g., requires Docker, system packages, etc.).\n\n"
+        "CRITICAL: Default answers must be concrete ADDITIONS to the PRD, not vague advice.\n\n"
         + _PANEL_JSON_SCHEMA
     )
 
@@ -2119,11 +2132,12 @@ def _run_iteration_expert_panel(
     iteration_guidance = (
         "This is an ITERATION REVIEW, not initial planning. The project has been built "
         "at least once. Focus on:\n"
-        "- What failed in the previous build and why\n"
-        "- What concrete PRD changes will fix the failures\n"
-        "- Scope reduction over scope expansion\n"
-        "- Practical, buildable solutions over ideal solutions\n"
-        "Do NOT suggest adding new features. Focus on making existing features pass."
+        "- What DETAIL is missing from the PRD that caused features to fail?\n"
+        "- What acceptance criteria, edge cases, or implementation notes should be ADDED?\n"
+        "- What constraints or data structures should be explicitly documented?\n"
+        "- What specific file paths, function signatures, or interfaces should be defined?\n"
+        "Do NOT suggest adding NEW features. Focus on making EXISTING features more "
+        "detailed and specific so they build correctly. The PRD should GROW in richness."
     )
 
     # 6. Run the expert panel (reusing planner's engine)
@@ -3030,9 +3044,155 @@ def _enrich_feedback(user_feedback: str) -> str:
     return user_feedback
 
 
-def _improve_prd_with_context(prd_text: str, iteration_context: str, user_feedback: str) -> str:
-    """Rewrite the PRD using build results and user feedback. Single LLM call."""
+# ── Decision Synthesis & Log ──────────────────────────────────────
+
+DECISIONS_LOG = Path("context") / "decisions.jsonl"
+
+
+def _load_decision_history() -> list[dict]:
+    """Load accumulated decisions from context/decisions.jsonl."""
+    if not DECISIONS_LOG.exists():
+        return []
+    decisions = []
+    try:
+        for line in DECISIONS_LOG.read_text(encoding="utf-8").strip().splitlines():
+            if line.strip():
+                decisions.append(json.loads(line))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.debug("Failed to load decision history: %s", exc)
+    return decisions
+
+
+def _save_decisions(decisions: list[dict], iteration: int) -> None:
+    """Append new decisions to context/decisions.jsonl."""
+    DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(DECISIONS_LOG, "a", encoding="utf-8") as f:
+        for d in decisions:
+            d["iteration"] = iteration
+            d["timestamp"] = datetime.now(timezone.utc).isoformat()
+            f.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+
+def _synthesize_decisions(
+    qa_transcript: list[dict],
+    user_feedback: str,
+    iteration_context: str,
+    tech_findings: str = "",
+) -> list[dict]:
+    """Synthesize structured decisions from expert panel transcript + user feedback.
+
+    Calls the LLM to extract explicit, typed decisions from the raw
+    Q&A transcript.  Each decision has a type, target section, the
+    decision text, and rationale.
+
+    Returns a list of decision dicts.  Falls back to simple extraction
+    if the LLM call fails.
+    """
+    # Build the transcript text
+    transcript_text = ""
+    for entry in qa_transcript:
+        transcript_text += (
+            f"- [{entry.get('expert', '?')}] Q: {entry.get('question', '')}\n"
+            f"  A: {entry.get('answer', '')} (source: {entry.get('tag', 'UNKNOWN')})\n"
+        )
+
+    # Load previous decisions for context
+    history = _load_decision_history()
+    history_text = ""
+    if history:
+        history_text = "\n## Previous Decisions (do not contradict without reason)\n"
+        for h in history[-20:]:  # Last 20 decisions
+            history_text += f"- [iter {h.get('iteration', '?')}] {h.get('type', '?')}: {h.get('decision', '')}\n"
+
+    prompt = (
+        f"You are a decision synthesizer. Analyze the expert panel transcript and "
+        f"user feedback below, then extract STRUCTURED DECISIONS.\n\n"
+        f"## User Feedback\n{user_feedback}\n\n"
+        f"## Expert Panel Transcript\n{transcript_text}\n"
+        f"{'## Tech Findings' + chr(10) + tech_findings + chr(10) if tech_findings else ''}"
+        f"\n## Build Context\n{iteration_context[:2000]}\n"
+        f"{history_text}\n\n"
+        f"Extract decisions as a JSON array. Each decision must have:\n"
+        f'- "type": one of "enrich", "constrain", "descope", "detail", "fix"\n'
+        f'  - "enrich": add more detail, examples, acceptance criteria to a feature\n'
+        f'  - "constrain": add a technical or scope constraint\n'
+        f'  - "descope": move feature to Out of Scope (only when fundamentally unbuildable)\n'
+        f'  - "detail": expand a vague description with specific implementation notes\n'
+        f'  - "fix": correct something that was wrong or caused a build failure\n'
+        f'- "target": the section or feature this applies to (e.g., "Feature: Combat System")\n'
+        f'- "decision": the concrete change to make (2-3 sentences)\n'
+        f'- "rationale": why this decision was made (1 sentence)\n\n'
+        f"BIAS: Prefer 'enrich' and 'detail' over 'descope'. "
+        f"Only descope when something is fundamentally impossible to build. "
+        f"When a feature failed, the FIRST instinct is to add specificity about HOW "
+        f"it should work — not to remove it.\n\n"
+        f"Return ONLY a JSON array, no preamble."
+    )
+
+    try:
+        raw = call_llm(
+            prompt,
+            system=(
+                "You are an expert at crystallizing decisions from discussions. "
+                "Extract clear, actionable decisions. Respond only with valid JSON."
+            ),
+            provider="anthropic",
+        )
+    except Exception as exc:
+        logger.debug("Decision synthesis LLM call failed: %s", exc)
+        raw = ""
+
+    if raw:
+        parsed = parse_json(raw)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict) and "decisions" in parsed:
+            return parsed["decisions"]
+
+    # Fallback: extract decisions from transcript mechanically
+    decisions = []
+    for entry in qa_transcript:
+        tag = entry.get("tag", "")
+        if tag in ("FACT", "DECISION"):
+            decisions.append({
+                "type": "enrich",
+                "target": entry.get("question", "")[:60],
+                "decision": entry.get("answer", ""),
+                "rationale": f"Expert {entry.get('expert', '?')} recommendation",
+            })
+    return decisions
+
+
+def _format_decisions_for_prd_edit(decisions: list[dict]) -> str:
+    """Format synthesized decisions into a structured prompt section."""
+    if not decisions:
+        return ""
+
+    parts = ["## Synthesized Decisions (apply these to the PRD)\n"]
+    for i, d in enumerate(decisions, 1):
+        dtype = d.get("type", "enrich").upper()
+        target = d.get("target", "General")
+        decision = d.get("decision", "")
+        rationale = d.get("rationale", "")
+        parts.append(
+            f"{i}. [{dtype}] Target: {target}\n"
+            f"   Decision: {decision}\n"
+            f"   Rationale: {rationale}"
+        )
+    return "\n".join(parts)
+
+
+def _improve_prd_with_context(prd_text: str, iteration_context: str, user_feedback: str,
+                               decisions: list[dict] | None = None) -> str:
+    """Enrich the PRD using build results, user feedback, and synthesized decisions.
+
+    Unlike a destructive rewrite, this function GROWS the PRD by adding
+    detail, constraints, and acceptance criteria.  Features that failed
+    get MORE description (how to build them), not less.  Only
+    fundamentally unbuildable features are moved to Out of Scope.
+    """
     enriched = _enrich_feedback(user_feedback)
+    decisions_text = _format_decisions_for_prd_edit(decisions) if decisions else ""
 
     # Read README for product voice context
     readme_context = ""
@@ -3049,15 +3209,31 @@ def _improve_prd_with_context(prd_text: str, iteration_context: str, user_feedba
         f"{prd_text}\n\n"
         f"## Build Results\n{iteration_context}\n\n"
         f"## User Feedback\n{enriched}\n\n"
-        f"Rewrite the PRD to address these failures. If features stalled, "
-        f"simplify or reduce scope. Incorporate the user's feedback. "
-        f"Keep the same markdown structure. Return ONLY the PRD in markdown, no preamble."
+        f"{decisions_text}\n\n"
+        f"ENRICH the PRD by applying each decision above. Rules:\n"
+        f"1. For 'ENRICH' decisions: ADD paragraphs, bullets, acceptance criteria to the target section. "
+        f"   Do NOT rewrite existing text — append below it.\n"
+        f"2. For 'DETAIL' decisions: Expand vague descriptions with specific implementation notes, "
+        f"   file paths, function signatures, data structures.\n"
+        f"3. For 'CONSTRAIN' decisions: Add a '### Constraints' subsection or bullet to the target.\n"
+        f"4. For 'FIX' decisions: Modify the specific incorrect statement.\n"
+        f"5. For 'DESCOPE' decisions: Move the feature to an '## Out of Scope' section "
+        f"   at the bottom — include the rationale. Do NOT delete.\n\n"
+        f"CRITICAL: The output PRD must be LONGER and MORE DETAILED than the input. "
+        f"Every existing sentence must be preserved unless directly contradicted by a decision. "
+        f"When a feature failed, ADD specificity about HOW it should be built.\n"
+        f"Return ONLY the enriched PRD in markdown, no preamble."
     )
 
     system_parts = [
-        "You are a PRD editor specializing in scope reduction and iterative improvement. "
-        "When features stall or fail, simplify them — remove complexity, reduce count, "
-        "merge related features. The goal is a PRD that will build successfully. "
+        "You are a PRD enrichment editor. Your job is to make PRDs GROW in specificity "
+        "and detail with each iteration. You NEVER delete content unless explicitly "
+        "told to descope something. When features failed to build, you add more detail "
+        "about HOW they should be implemented — specific file structures, function "
+        "signatures, data formats, step-by-step instructions. "
+        "You ADD acceptance criteria, edge cases, constraints, and implementation notes. "
+        "The PRD should be the definitive source of truth — rich enough that a developer "
+        "can build each feature without guessing. "
         "Do NOT invent features the user didn't ask for. "
         "Return ONLY the PRD in markdown.",
     ]
@@ -3092,16 +3268,19 @@ def _improve_specs_with_context(
     specs: dict[str, str],
     iteration_context: str,
     user_feedback: str,
+    decisions: list[dict] | None = None,
 ) -> dict[str, str]:
-    """Rewrite multiple spec files using build results and user feedback.
+    """Enrich multiple spec files using build results, user feedback, and decisions.
 
     Takes all spec contents as a dict ``{relative_path: content}``.
     Returns dict ``{relative_path: improved_content}`` for files that
     actually changed.  Unchanged files are **not** included.
 
     Uses a single LLM call with all specs for cross-file coherence.
+    The approach is ADDITIVE — specs grow richer, never thinner.
     """
     enriched = _enrich_feedback(user_feedback)
+    decisions_text = _format_decisions_for_prd_edit(decisions) if decisions else ""
 
     # Read README for product voice context
     readme_context = ""
@@ -3125,30 +3304,36 @@ def _improve_specs_with_context(
         f"{all_specs_text}\n\n"
         f"## Build Results\n{iteration_context}\n\n"
         f"## User Feedback\n{enriched}\n\n"
-        f"Analyze ALL spec files against the build failures and user feedback.\n"
-        f"Rewrite ONLY the files that need changes to address failures.\n"
-        f"If features stalled, simplify or reduce scope in the relevant spec file.\n"
-        f"Incorporate the user's feedback into the appropriate file(s).\n"
-        f"Keep each file's markdown structure intact.\n\n"
+        f"{decisions_text}\n\n"
+        f"ENRICH the spec files by applying the decisions above. Rules:\n"
+        f"1. PRESERVE all existing text. Only ADD, never delete (unless descoping).\n"
+        f"2. For 'ENRICH'/'DETAIL' decisions: add paragraphs, bullets, acceptance criteria.\n"
+        f"3. For 'FIX' decisions: modify the specific incorrect statement.\n"
+        f"4. For 'DESCOPE' decisions: move to '## Out of Scope' with rationale.\n"
+        f"5. Make changes in the most specific file possible.\n"
+        f"6. Each changed file must be LONGER and MORE DETAILED than its input.\n\n"
         f"Return a JSON object where:\n"
         f"- Keys are the file paths (exactly as listed above)\n"
-        f"- Values are the COMPLETE improved markdown content for that file\n"
+        f"- Values are the COMPLETE enriched markdown content for that file\n"
         f"- Only include files that actually changed\n"
         f"- Do NOT include unchanged files\n\n"
         f"Return ONLY the JSON object, no preamble or explanation.\n"
-        f'Example: {{"specs/PRD.md": "# PRD\\n\\nImproved content...", '
-        f'"specs/verticals/home/sections.md": "# Home Sections\\n\\nImproved..."}}'
+        f'Example: {{"specs/PRD.md": "# PRD\\n\\nEnriched content...", '
+        f'"specs/verticals/home/sections.md": "# Home Sections\\n\\nEnriched..."}}'
     )
 
     system_parts = [
-        "You are a spec editor specializing in scope reduction and iterative improvement. "
-        "When features stall or fail, simplify them in the RELEVANT spec file. "
+        "You are a spec enrichment editor. Your job is to make specs GROW richer "
+        "and more detailed with each iteration. You NEVER delete content unless "
+        "explicitly told to descope something. "
+        "When features failed to build, you add MORE detail about HOW they should "
+        "be implemented — specific file structures, function signatures, data formats. "
         "The project may have multiple spec files: a main PRD for global rules, "
         "structure files, style guides, and per-vertical configs. "
         "Make changes in the most specific file possible (e.g., fix a vertical issue "
         "in that vertical's spec, not in the global PRD). "
         "Do NOT invent features the user didn't ask for. "
-        "Return ONLY a JSON object mapping changed file paths to their improved content.",
+        "Return ONLY a JSON object mapping changed file paths to their enriched content.",
     ]
     if readme_context:
         system_parts.append(
@@ -4041,23 +4226,91 @@ def run_iterate(prd_path: str | None = None) -> bool:
                 else prd.read_text(encoding="utf-8")
             )
 
-        # ── Expert panel review (non-blocking) ──
+        # ── Expert panel review ──
         enriched_feedback = _run_iteration_expert_panel(
             combined_spec_text, iteration_context, feedback,
         )
 
-        # ── Tech stack panel (non-blocking) ──
+        # ── Tech stack panel ──
         tech_findings = _run_tech_stack_panel(
             combined_spec_text, iteration_context, feedback,
         )
+
+        # ── SYNTHESIZE DECISIONS ──
+        # Extract the qa_transcript from enriched_feedback for synthesis
+        print(f"\n  {DIM}Synthesizing decisions...{RESET}")
+        qa_lines = []
+        for line in enriched_feedback.splitlines():
+            if line.startswith("- [") and "] Q:" in line:
+                qa_lines.append(line)
+        # Build a minimal transcript for synthesis
+        synth_transcript = []
+        for line in enriched_feedback.splitlines():
+            if line.startswith("- ["):
+                # Parse "- [Expert] Q: question\n  A: answer (source: TAG)"
+                parts = line.split("] Q:", 1)
+                if len(parts) == 2:
+                    expert = parts[0].lstrip("- [")
+                    rest = parts[1].strip()
+                    synth_transcript.append({
+                        "expert": expert,
+                        "question": rest,
+                        "answer": rest,
+                        "tag": "DECISION",
+                    })
+            elif line.strip().startswith("A:"):
+                if synth_transcript:
+                    answer_text = line.strip().lstrip("A:").strip()
+                    # Extract tag if present
+                    tag = "DECISION"
+                    if "(source:" in answer_text:
+                        tag_part = answer_text.split("(source:")[-1].rstrip(")")
+                        tag = tag_part.strip()
+                        answer_text = answer_text.split("(source:")[0].strip()
+                    synth_transcript[-1]["answer"] = answer_text
+                    synth_transcript[-1]["tag"] = tag
+
+        decisions = _synthesize_decisions(
+            synth_transcript, feedback, iteration_context,
+            tech_findings=tech_findings or "",
+        )
+
+        # ── Print decisions ──
+        if decisions:
+            iter_num = _next_iteration_number()
+            print(f"\n  {BOLD}── Synthesized Decisions ({len(decisions)}) ──{RESET}")
+            enrich_count = sum(1 for d in decisions if d.get("type") in ("enrich", "detail"))
+            fix_count = sum(1 for d in decisions if d.get("type") == "fix")
+            constrain_count = sum(1 for d in decisions if d.get("type") == "constrain")
+            descope_count = sum(1 for d in decisions if d.get("type") == "descope")
+            print(f"    {GREEN}+{enrich_count} enrich/detail{RESET}  "
+                  f"{CYAN}+{fix_count} fix{RESET}  "
+                  f"{YELLOW}+{constrain_count} constrain{RESET}  "
+                  f"{RED}-{descope_count} descope{RESET}")
+            for d in decisions[:8]:
+                dtype = d.get("type", "?").upper()
+                target = d.get("target", "?")[:50]
+                decision = d.get("decision", "")[:80]
+                print(f"    [{dtype}] {target}: {decision}")
+            if len(decisions) > 8:
+                print(f"    {DIM}... +{len(decisions) - 8} more{RESET}")
+            print()
+
+            # ── Persist decisions to log ──
+            _save_decisions(decisions, iter_num)
+            print(f"  {DIM}Decisions saved to {DECISIONS_LOG}{RESET}")
+        else:
+            decisions = []
+
         if tech_findings:
             enriched_feedback += "\n\n" + tech_findings
 
         if is_multi_spec:
-            # ── Multi-spec improvement ──
-            print(f"\n  {DIM}Improving {len(specs)} spec files...{RESET}")
+            # ── Multi-spec enrichment ──
+            print(f"\n  {DIM}Enriching {len(specs)} spec files...{RESET}")
             improved_specs = _improve_specs_with_context(
                 specs, iteration_context, enriched_feedback,
+                decisions=decisions,
             )
 
             if not improved_specs:
@@ -4065,18 +4318,27 @@ def run_iterate(prd_path: str | None = None) -> bool:
                 return False
 
             # ── Show per-file change summary ──
-            print(f"\n  {BOLD}── Changes Summary ──{RESET}")
+            print(f"\n  {BOLD}── Enrichment Summary ──{RESET}")
+            total_delta = 0
             for path, new_content in improved_specs.items():
                 old_content = specs.get(path, "")
                 old_lines = len(old_content.splitlines())
                 new_lines = len(new_content.splitlines())
                 delta = new_lines - old_lines
+                total_delta += delta
                 delta_str = f"+{delta}" if delta >= 0 else str(delta)
-                print(f"    {GREEN}M{RESET} {path} ({old_lines} → {new_lines} lines, {delta_str})")
+                color = GREEN if delta >= 0 else RED
+                print(f"    {color}M{RESET} {path} ({old_lines} → {new_lines} lines, {delta_str})")
 
             unchanged = len(specs) - len(improved_specs)
             if unchanged > 0:
                 print(f"    {DIM}{unchanged} file(s) unchanged{RESET}")
+
+            # ── Richness guard ──
+            if total_delta < 0 and descope_count < 3:
+                print(f"    {YELLOW}⚠ PRD shrank by {abs(total_delta)} lines without major descoping!{RESET}")
+            elif total_delta > 0:
+                print(f"    {GREEN}✓ PRD grew by +{total_delta} lines (richer){RESET}")
             print()
 
             # ── Preview first changed file ──
@@ -4090,7 +4352,7 @@ def run_iterate(prd_path: str | None = None) -> bool:
 
             # ── Accept or abort ──
             print(f"\n  {BOLD}Options:{RESET}")
-            print(f"    {GREEN}(1){RESET} Accept all changes and re-run")
+            print(f"    {GREEN}(1){RESET} Accept enriched specs and re-run")
             print(f"    {DIM}(2){RESET} Abort")
             print()
 
@@ -4129,11 +4391,23 @@ def run_iterate(prd_path: str | None = None) -> bool:
                 else prd.read_text(encoding="utf-8")
             )
 
-            print(f"\n  {DIM}Improving PRD...{RESET}")
-            improved = _improve_prd_with_context(prd_text, iteration_context, enriched_feedback)
+            print(f"\n  {DIM}Enriching PRD...{RESET}")
+            improved = _improve_prd_with_context(
+                prd_text, iteration_context, enriched_feedback,
+                decisions=decisions,
+            )
+
+            # ── Richness guard ──
+            old_lines = len(prd_text.splitlines())
+            new_lines = len(improved.splitlines())
+            delta = new_lines - old_lines
+            if delta < 0 and descope_count < 3:
+                print(f"  {YELLOW}⚠ PRD shrank by {abs(delta)} lines — may have lost detail{RESET}")
+            elif delta > 0:
+                print(f"  {GREEN}✓ PRD grew by +{delta} lines (richer){RESET}")
 
             # ── Show what changed ──
-            print(f"\n  {BOLD}── Improved PRD (preview) ──{RESET}")
+            print(f"\n  {BOLD}── Enriched PRD (preview) ──{RESET}")
             preview = improved[:800]
             if len(improved) > 800:
                 preview += "\n..."
