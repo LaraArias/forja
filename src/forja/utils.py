@@ -6,7 +6,10 @@ import json
 import logging
 import os
 import re
+import shutil
+import signal
 import ssl
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -413,6 +416,52 @@ def call_kimi(prompt: str, system: str = "") -> str:
 def call_anthropic(prompt: str, system: str = "") -> str:
     """Call Anthropic provider. Wrapper around :func:`call_llm`."""
     return call_llm(prompt, system, provider="anthropic")
+
+
+def _call_claude_code(prompt: str, system: str = "", timeout: int = 120) -> str:
+    """Call Claude Code CLI (``claude -p``) and return text response.
+
+    Falls back to :func:`call_llm` with ``provider="anthropic"`` when the
+    ``claude`` binary is not found or the CLI invocation fails.
+
+    Args:
+        prompt:  The user prompt to send.
+        system:  Optional system prompt (prepended to *prompt*).
+        timeout: Seconds before the subprocess is terminated.
+
+    Returns:
+        The model's text response.
+    """
+    if shutil.which("claude") is None:
+        return call_llm(prompt, system=system, provider="anthropic")
+
+    full_prompt = f"{system}\n\n{prompt}" if system else prompt
+
+    try:
+        proc = subprocess.Popen(
+            ["claude", "--dangerously-skip-permissions", "-p", full_prompt,
+             "--output-format", "text"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            preexec_fn=os.setsid,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            if proc.returncode == 0 and stdout:
+                return stdout.decode(errors="replace").strip()
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=10)
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except OSError:
+                    pass
+    except (FileNotFoundError, OSError):
+        pass
+
+    # Fallback to direct API
+    return call_llm(prompt, system=system, provider="anthropic")
 
 
 # ── JSON parsing ────────────────────────────────────────────────────

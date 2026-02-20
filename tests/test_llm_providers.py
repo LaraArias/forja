@@ -1,4 +1,4 @@
-"""Tests for multi-provider LLM support (call_llm, _call_provider).
+"""Tests for multi-provider LLM support (call_llm, _call_provider, _call_claude_code).
 
 Covers:
 1. Auto fallback - tries providers in order, falls back on failure
@@ -6,10 +6,13 @@ Covers:
 3. Unknown provider - raises ValueError
 4. Backward-compat wrappers - call_kimi/call_anthropic delegate to call_llm
 5. OpenAI raw provider - _call_openai_raw sends correct payload
+6. _call_claude_code - Claude Code CLI helper with fallback
 """
 
 import json
 import os
+import signal
+import subprocess
 import urllib.error
 from unittest.mock import MagicMock, patch
 
@@ -191,3 +194,93 @@ class TestOpenAIRaw:
         with patch("forja.utils.load_dotenv"):
             with pytest.raises(RuntimeError, match="OPENAI_API_KEY not set"):
                 _call_openai_raw("hello", "", "gpt-4o")
+
+
+class TestCallClaudeCode:
+    """_call_claude_code invokes Claude Code CLI with fallback to call_llm."""
+
+    def test_uses_cli_when_available(self, monkeypatch):
+        from forja.utils import _call_claude_code
+
+        monkeypatch.setattr("forja.utils.shutil.which", lambda _: "/usr/local/bin/claude")
+
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (b"CLI response text", b"")
+        mock_proc.returncode = 0
+        mock_proc.pid = 12345
+
+        with patch("forja.utils.subprocess.Popen", return_value=mock_proc) as mock_popen:
+            result = _call_claude_code("test prompt")
+
+        assert result == "CLI response text"
+        args = mock_popen.call_args[0][0]
+        assert args[0] == "claude"
+        assert "--dangerously-skip-permissions" in args
+        assert "-p" in args
+        assert "--output-format" in args
+        assert "text" in args
+
+    def test_combines_system_and_user_prompt(self, monkeypatch):
+        from forja.utils import _call_claude_code
+
+        monkeypatch.setattr("forja.utils.shutil.which", lambda _: "/usr/local/bin/claude")
+
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (b"response", b"")
+        mock_proc.returncode = 0
+        mock_proc.pid = 12345
+
+        with patch("forja.utils.subprocess.Popen", return_value=mock_proc) as mock_popen:
+            _call_claude_code("user msg", system="system msg")
+
+        args = mock_popen.call_args[0][0]
+        prompt_arg_idx = args.index("-p") + 1
+        assert args[prompt_arg_idx] == "system msg\n\nuser msg"
+
+    def test_falls_back_when_no_cli(self, monkeypatch):
+        from forja.utils import _call_claude_code
+
+        monkeypatch.setattr("forja.utils.shutil.which", lambda _: None)
+
+        with patch("forja.utils.call_llm", return_value="api response") as mock_llm:
+            result = _call_claude_code("hello", system="sys")
+
+        assert result == "api response"
+        mock_llm.assert_called_once_with("hello", system="sys", provider="anthropic")
+
+    def test_falls_back_on_timeout(self, monkeypatch):
+        from forja.utils import _call_claude_code
+
+        monkeypatch.setattr("forja.utils.shutil.which", lambda _: "/usr/local/bin/claude")
+
+        mock_proc = MagicMock()
+        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=120)
+        mock_proc.pid = 12345
+        mock_proc.wait.return_value = 0
+
+        monkeypatch.setattr("forja.utils.os.getpgid", lambda pid: pid)
+        monkeypatch.setattr("forja.utils.os.killpg", lambda pgid, sig: None)
+
+        with patch("forja.utils.subprocess.Popen", return_value=mock_proc), \
+             patch("forja.utils.call_llm", return_value="fallback") as mock_llm:
+            result = _call_claude_code("hello")
+
+        assert result == "fallback"
+        mock_llm.assert_called_once()
+
+    def test_falls_back_on_nonzero_exit(self, monkeypatch):
+        from forja.utils import _call_claude_code
+
+        monkeypatch.setattr("forja.utils.shutil.which", lambda _: "/usr/local/bin/claude")
+
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (b"", b"error occurred")
+        mock_proc.returncode = 1
+        mock_proc.pid = 12345
+
+        with patch("forja.utils.subprocess.Popen", return_value=mock_proc), \
+             patch("forja.utils.call_llm", return_value="fallback") as mock_llm:
+            result = _call_claude_code("hello")
+
+        assert result == "fallback"
+        mock_llm.assert_called_once()

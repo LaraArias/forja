@@ -15,8 +15,10 @@ import os
 import sys
 from pathlib import Path
 
+import shutil
+
 from forja_utils import (
-    load_dotenv, call_llm, parse_json,
+    load_dotenv, _call_claude_code, parse_json,
     PASS_ICON, FAIL_ICON, WARN_ICON, GREEN, RED, DIM, BOLD, RESET,
     Feature,
 )
@@ -365,10 +367,11 @@ def cmd_outcome(prd_path, output_format="text"):
     if det_met_count or det_unmet_count:
         print(f"  Deterministic: {det_met_count} MET, {det_unmet_count} UNMET (from probe matching)")
 
-    # 4. Check API key
+    # 4. Check API key or Claude CLI
     load_dotenv()
     has_key = any(os.environ.get(k) for k in ("KIMI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"))
-    if not has_key:
+    has_claude = shutil.which("claude") is not None
+    if not has_key and not has_claude:
         # Graceful degradation: output deterministic results if available
         if det_met_count or det_unmet_count:
             total_eval = det_met_count + det_unmet_count
@@ -379,7 +382,7 @@ def cmd_outcome(prd_path, output_format="text"):
                 "met": [m["endpoint"] for m in det_results["met"]],
                 "unmet": [f"{u['endpoint']}: {u['reason']}" for u in det_results["unmet"]],
                 "deferred": [],
-                "summary": f"Deterministic evaluation only (no LLM key). "
+                "summary": f"Deterministic evaluation only (no LLM key or Claude CLI). "
                            f"{det_met_count} endpoints verified by probes.",
             }
             if output_format == "json":
@@ -389,14 +392,14 @@ def cmd_outcome(prd_path, output_format="text"):
             report_path = _save_report(result)
             print(f"  Report saved to {report_path}")
             sys.exit(0 if result["pass"] else 1)
-        print(f"{WARN_ICON} Outcome evaluation skipped: no LLM API key configured")
+        print(f"{WARN_ICON} Outcome evaluation skipped: no LLM API key or Claude CLI")
         sys.exit(0)
 
     # 5. Call LLM with deterministic context
     print(f"  Calling LLM for outcome evaluation...")
     prompt, system_msg = _build_prompt(prd_content, features_text, specs_text,
                                        deterministic_results=det_results)
-    raw_content = call_llm(prompt, system=system_msg)
+    raw_content = _call_claude_code(prompt, system=system_msg)
 
     if not raw_content:
         print(f"{WARN_ICON} Outcome evaluation skipped: LLM did not respond")

@@ -30,6 +30,7 @@ _DEFAULTS = {
         "auto_expert_panels": False,
         "quality_visual_score": 70,
         "quality_probe_pass_rate": 70,
+        "enrichment_timeout_seconds": 300,
     },
     "models": {
         "kimi_model": "kimi-k2-0711-preview",
@@ -61,6 +62,7 @@ class BuildConfig:
     auto_expert_panels: bool
     quality_visual_score: int
     quality_probe_pass_rate: int
+    enrichment_timeout_seconds: int
 
 
 @dataclass(frozen=True)

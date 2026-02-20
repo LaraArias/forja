@@ -20,7 +20,7 @@ class TestContextSetupAntiHallucination:
         with (
             patch("forja.context_setup._ask", return_value="Acme Corp"),
             patch("forja.context_setup._ask_choice", return_value=(1, "None")),
-            patch("forja.context_setup.call_llm", return_value="# Acme Corp\nA company.") as mock_llm,
+            patch("forja.context_setup._call_claude_code", return_value="# Acme Corp\nA company.") as mock_llm,
         ):
             _setup_company(target)
 
@@ -70,7 +70,7 @@ class TestContextSetupAntiHallucination:
             patch("forja.context_setup._ask_choice", return_value=(1, "Developers")),
             patch("forja.context_setup._ask", return_value="Fast builds"),
             patch("forja.context_setup._ask_multiline", return_value=["Too expensive"]),
-            patch("forja.context_setup.call_llm", return_value=domain_json) as mock_llm,
+            patch("forja.context_setup._call_claude_code", return_value=domain_json) as mock_llm,
             patch("forja.context_setup.parse_json", return_value=json.loads(domain_json)),
         ):
             _setup_domain(target, "Acme", "A build tool")

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,13 +27,15 @@ logger = logging.getLogger("forja")
 
 from forja.config_loader import load_config
 from forja.constants import (
-    BUILD_PROMPT, CLAUDE_MD, CONTEXT_DIR, FORJA_DIR, FORJA_TOOLS,
-    PRD_PATH, SPECS_DIR, STORE_DIR, TEAMMATES_DIR, WORKFLOW_PATH,
+    BUILD_PROMPT, CLAUDE_MD, CONTEXT_DIR, DECOMPOSE_PROMPT,
+    ENRICHMENT_PROMPT, FEATURE_PROMPT, FORJA_DIR,
+    FORJA_TOOLS, PRD_PATH, SPECS_DIR, STORE_DIR, TEAMMATES_DIR,
+    WORKFLOW_PATH,
 )
 from forja.utils import (
     BOLD, CYAN, DIM, GREEN, RED, YELLOW, RESET,
-    Feature, call_llm, gather_context, load_dotenv, parse_json,
-    read_feature_status, safe_read_json,
+    Feature, _call_claude_code, call_llm, gather_context, load_dotenv,
+    parse_json, read_feature_status, safe_read_json,
 )
 
 # ── Placeholder detection ────────────────────────────────────────────
@@ -947,10 +950,259 @@ def _count_features():
     return total, passed, blocked
 
 
+# ── Fresh-context execution engine ───────────────────────────────
+
+
+def _run_subprocess_with_timeout(
+    cmd: list[str], env: dict, timeout: int,
+) -> tuple[int, bool]:
+    """Run a subprocess with timeout and process-group cleanup.
+
+    Returns ``(returncode, timed_out)``.
+    """
+    timed_out = False
+    try:
+        proc = subprocess.Popen(
+            cmd, env=env, preexec_fn=os.setsid,
+        )
+        start = time.time()
+        while proc.poll() is None:
+            if time.time() - start > timeout:
+                timed_out = True
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    proc.wait(timeout=10)
+                except (subprocess.TimeoutExpired, OSError):
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        proc.wait(timeout=5)
+                    except OSError:
+                        pass
+                break
+            time.sleep(1)
+        return proc.returncode or 0, timed_out
+    except (FileNotFoundError, OSError) as exc:
+        logger.debug("Subprocess failed: %s", exc)
+        return 1, False
+
+
+def _run_decomposition(env: dict, timeout: int = 300) -> bool:
+    """Phase 2a: decompose PRD into epics/teammates without building.
+
+    Launches Claude Code with ``DECOMPOSE_PROMPT`` which reads CLAUDE.md
+    and generates teammate artifacts (features.json, validation_spec.json,
+    teammate CLAUDE.md, teammate_map.json) but does NOT spawn agent teams.
+
+    Returns True if ``teammate_map.json`` was created.
+    """
+    print(f"  {DIM}Decomposing PRD into epics...{RESET}")
+    cmd = [
+        "claude", "--dangerously-skip-permissions",
+        "-p", DECOMPOSE_PROMPT, "--output-format", "text",
+    ]
+    returncode, timed_out = _run_subprocess_with_timeout(cmd, env, timeout)
+    teammate_map = TEAMMATES_DIR.parent / "teammate_map.json"
+    if timed_out:
+        print(f"  {YELLOW}Decomposition timed out after {timeout}s{RESET}")
+    if teammate_map.exists():
+        print(f"  {GREEN}✔ Decomposition complete{RESET}")
+        return True
+    print(f"  {YELLOW}Decomposition did not produce teammate_map.json{RESET}")
+    return False
+
+
+def _run_feature(name: str, env: dict, timeout: int = 600) -> dict:
+    """Execute a single feature/epic with a FRESH Claude Code context.
+
+    Each invocation spawns a new ``claude`` process that reads only
+    the teammate's own CLAUDE.md — guaranteeing a full 200k-token
+    context window free of cross-feature pollution.
+
+    Returns ``{"name", "success", "elapsed", "passed", "total"}``.
+    """
+    prompt = FEATURE_PROMPT.format(name=name)
+    cmd = [
+        "claude", "--dangerously-skip-permissions",
+        "-p", prompt, "--output-format", "text",
+    ]
+    start = time.time()
+    returncode, timed_out = _run_subprocess_with_timeout(cmd, env, timeout)
+    elapsed = time.time() - start
+
+    # Read features.json to check results
+    fj = TEAMMATES_DIR / name / "features.json"
+    data = safe_read_json(fj) or {}
+    features = data.get("features", []) if isinstance(data, dict) else []
+    passed = sum(1 for f in features if f.get("status") == "passed")
+    total = len(features)
+
+    return {
+        "name": name,
+        "success": not timed_out and passed == total and total > 0,
+        "elapsed": elapsed,
+        "passed": passed,
+        "total": total,
+        "timed_out": timed_out,
+    }
+
+
+def _compute_waves(teammates_dir: Path) -> list[list[str]]:
+    """Group teammates into parallel execution waves.
+
+    Wave assignment:
+    - QA is always in the last wave (depends on all others).
+    - Teammates with ``consumes`` entries in their validation_spec.json
+      are placed after the teammates they consume from.
+    - All others go in Wave 1 (independent, run in parallel).
+    """
+    if not teammates_dir.exists():
+        return []
+
+    names: list[str] = []
+    deps: dict[str, set[str]] = {}
+
+    for agent_dir in sorted(teammates_dir.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        name = agent_dir.name
+        names.append(name)
+        deps[name] = set()
+
+        spec_path = agent_dir / "validation_spec.json"
+        if spec_path.exists():
+            spec = safe_read_json(spec_path)
+            if spec and isinstance(spec, dict):
+                for c in spec.get("consumes", []):
+                    dep = c.get("from_teammate", "")
+                    if dep:
+                        deps[name].add(dep)
+
+    if not names:
+        return []
+
+    # Separate QA from the rest (always last)
+    qa_names = [n for n in names if n.lower() == "qa"]
+    build_names = [n for n in names if n.lower() != "qa"]
+
+    # Assign wave numbers — iterative topological sort
+    # First pass: assign wave 1 to all nodes with no deps
+    wave_of: dict[str, int] = {}
+    for name in build_names:
+        if not deps[name] or not deps[name].intersection(build_names):
+            wave_of[name] = 1
+
+    # Iterative passes: assign remaining nodes once all deps are assigned
+    remaining = [n for n in build_names if n not in wave_of]
+    for _ in range(len(build_names)):  # max iterations = number of nodes
+        if not remaining:
+            break
+        still_remaining = []
+        for name in remaining:
+            dep_waves = [wave_of[d] for d in deps[name] if d in wave_of]
+            if len(dep_waves) == len(deps[name].intersection(set(build_names))):
+                wave_of[name] = max(dep_waves) + 1 if dep_waves else 1
+            else:
+                still_remaining.append(name)
+        remaining = still_remaining
+
+    # Any remaining nodes (circular deps) go in last wave
+    if remaining:
+        max_assigned = max(wave_of.values()) if wave_of else 0
+        for name in remaining:
+            wave_of[name] = max_assigned + 1
+
+    # Group by wave number
+    max_wave = max(wave_of.values()) if wave_of else 0
+    waves: list[list[str]] = []
+    for w in range(1, max_wave + 1):
+        wave = sorted(n for n, wn in wave_of.items() if wn == w)
+        if wave:
+            waves.append(wave)
+
+    # QA always last
+    if qa_names:
+        waves.append(qa_names)
+
+    return waves
+
+
+def _generate_scoped_context_custom(teammates_dir: Path) -> None:
+    """Generate bounded context.md for each teammate in custom mode.
+
+    Called after Phase 2a decomposition creates teammate directories.
+    Each teammate gets only the PRD extract + bounded business context
+    instead of the entire project context.
+    """
+    prd = PRD_PATH.read_text(encoding="utf-8") if PRD_PATH.exists() else ""
+
+    for agent_dir in sorted(teammates_dir.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        name = agent_dir.name
+        claude_md = agent_dir / "CLAUDE.md"
+        if not claude_md.exists():
+            continue
+
+        parts = [f"# Context for {name}\n"]
+
+        # PRD extract (bounded to first 1500 chars)
+        if prd:
+            parts.append(f"## PRD Extract\n\n{prd[:1500]}")
+
+        # Business context (bounded)
+        biz = gather_context(CONTEXT_DIR, max_chars=1500)
+        if biz:
+            parts.append(f"## Business Context\n\n{biz}")
+
+        context_text = "\n\n".join(parts)
+        if len(context_text) > 4000:
+            context_text = context_text[:4000] + "\n\n... (truncated)"
+
+        (agent_dir / "context.md").write_text(context_text + "\n", encoding="utf-8")
+
+
+def _extract_commit_learnings() -> list[str]:
+    """Parse recent commit messages for ``Learnings:`` metadata lines.
+
+    Returns a list of learning strings extracted from git log.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%B---COMMIT_SEP---", "-30"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    learnings: list[str] = []
+    for msg in result.stdout.split("---COMMIT_SEP---"):
+        for line in msg.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Learnings:"):
+                learning = stripped[len("Learnings:"):].strip()
+                if learning and learning.lower() != "n/a":
+                    learnings.append(learning)
+    return learnings
+
+
 # ── Feedback loop helpers ─────────────────────────────────────────
 
+def _context_set(key: str, value: str, author: str, tags: str) -> None:
+    """Helper: persist a key/value pair via the context store script."""
+    ctx_script = FORJA_TOOLS / "forja_context.py"
+    if not ctx_script.exists():
+        return
+    try:
+        subprocess.run(
+            [sys.executable, str(ctx_script), "set",
+             key, value, "--author", author, "--tags", tags],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def _persist_planning_decisions():
-    """Save planning decisions to context store for build agents."""
+    """Save planning decisions + research to context store for build agents."""
     transcript = FORJA_DIR / "plan-transcript.json"
     if not transcript.exists():
         return
@@ -958,35 +1210,48 @@ def _persist_planning_decisions():
     if not data:
         return
 
-    answers = data.get("answers", [])
-    if not answers:
-        return
+    # Extract all answers from all rounds
+    all_answers: list[dict] = []
+    for rnd in data.get("rounds", []):
+        for ans in rnd.get("answers", []):
+            all_answers.append(ans)
 
-    decisions = []
-    for ans in answers[:10]:
+    # Also support legacy flat "answers" key for backward compat
+    if not all_answers:
+        all_answers = data.get("answers", [])
+
+    # Separate decisions/facts from assumptions
+    decisions: list[str] = []
+    for ans in all_answers:
+        tag = ans.get("tag", "")
         q = ans.get("question", "")
         a = ans.get("answer", "")
-        if q and a:
-            decisions.append(f"Q: {q}\nA: {a}")
+        if not q or not a:
+            continue
+        if tag in ("DECISION", "FACT"):
+            decisions.append(f"[{tag}] Q: {q}\nA: {a}")
 
-    if not decisions:
-        return
+    # Persist decisions
+    if decisions:
+        value = "\n---\n".join(decisions[:15])
+        if len(value) > 3000:
+            value = value[:3000]
+        _context_set("planning.decisions", value, "planner", "planning,decisions")
 
-    value = "\n---\n".join(decisions)
-    if len(value) > 2000:
-        value = value[:2000]
-
-    ctx_script = FORJA_TOOLS / "forja_context.py"
-    if ctx_script.exists():
-        try:
-            subprocess.run(
-                [sys.executable, str(ctx_script), "set",
-                 "planning.decisions", value,
-                 "--author", "planner", "--tags", "planning,decisions"],
-                capture_output=True, text=True, timeout=10,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+    # Persist research findings
+    research = data.get("research", [])
+    if research:
+        findings: list[str] = []
+        for r in research:
+            topic = r.get("topic", "")
+            body = r.get("findings", "")
+            if topic and body:
+                findings.append(f"## {topic}\n{body}")
+        if findings:
+            value = "\n\n".join(findings)
+            if len(value) > 3000:
+                value = value[:3000]
+            _context_set("planning.research", value, "planner", "planning,research")
 
 
 def _log_test_failures_as_learnings(test_results: dict):
@@ -2516,24 +2781,42 @@ def _auto_open_output():
     and shows the run command in the terminal.  For web projects, opens
     the HTML output too.
     """
+    import platform
     import socket
     import webbrowser
 
     from forja.planner import _detect_skill
 
-    # Prefer multi-run index dashboard when available, else latest run
+    # ── Always open the observatory (guaranteed) ──
     observatory_index = FORJA_DIR / "observatory" / "index.html"
     observatory_html = FORJA_DIR / "observatory" / "evals.html"
-    if observatory_index.exists():
-        webbrowser.open(f"file://{observatory_index.resolve()}")
-        print(f"\n  {GREEN}Observatory dashboard opened{RESET}")
-    elif observatory_html.exists():
-        webbrowser.open(f"file://{observatory_html.resolve()}")
-        print(f"\n  {GREEN}Observatory dashboard opened{RESET}")
+    open_path = (
+        observatory_index if observatory_index.exists()
+        else observatory_html if observatory_html.exists()
+        else None
+    )
+    if open_path:
+        try:
+            # Use platform 'open' command directly for reliability —
+            # webbrowser.open can silently fail on repeated calls.
+            abs_path = str(open_path.resolve())
+            if platform.system() == "Darwin":
+                subprocess.run(["open", abs_path], timeout=5)
+            elif platform.system() == "Linux":
+                subprocess.run(["xdg-open", abs_path], timeout=5)
+            else:
+                webbrowser.open(f"file://{abs_path}")
+            print(f"\n  {GREEN}Observatory dashboard opened{RESET}")
+        except Exception as exc:
+            logger.debug("Could not open observatory: %s", exc)
+            print(f"\n  {DIM}Observatory: file://{open_path.resolve()}{RESET}")
 
     # Detect entry point to decide what to open
-    entry_point = _detect_entry_point()
-    skill = _detect_skill()
+    try:
+        entry_point = _detect_entry_point()
+        skill = _detect_skill()
+    except Exception:
+        return  # Observatory already opened above; project output is optional
 
     if skill == "landing-page":
         # Search common landing page output paths
@@ -2771,50 +3054,147 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
     monitor.start()
 
     timed_out = False
+    build_ok = False
+    use_fresh_context = not WORKFLOW_PATH.exists()
+
     try:
-        proc = subprocess.Popen(
-            [
-                "claude",
-                "--dangerously-skip-permissions",
-                "-p", BUILD_PROMPT,
-                "--output-format", "text",
-            ],
-            env=env,
-            preexec_fn=os.setsid,
-        )
+        if use_fresh_context:
+            # ── Fresh-context mode: decompose → waves → feature-per-process ──
+            decomp_ok = _run_decomposition(env, timeout=300)
 
-        # Poll process, checking for timeout signal from monitor thread
-        while proc.poll() is None:
-            if timeout_event.is_set():
-                timed_out = True
-                # Kill the entire process group, not just the parent
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                    proc.wait(timeout=10)
-                except (subprocess.TimeoutExpired, OSError):
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                        proc.wait(timeout=5)
-                    except OSError as exc:
-                        logger.debug("SIGKILL failed for build process: %s", exc)
-                break
-            time.sleep(1)
+            if decomp_ok and TEAMMATES_DIR.exists():
+                # Generate scoped context for each teammate
+                _generate_scoped_context_custom(TEAMMATES_DIR)
 
-        returncode = proc.returncode or 0
+                # Compute parallel execution waves
+                waves = _compute_waves(TEAMMATES_DIR)
+                if waves:
+                    print(f"  {GREEN}✔ {sum(len(w) for w in waves)} teammates in {len(waves)} wave(s){RESET}")
+                    all_results: list[dict] = []
+
+                    for wave_num, wave_names in enumerate(waves, 1):
+                        print(f"\n  {BOLD}Wave {wave_num}/{len(waves)}: {', '.join(wave_names)}{RESET}")
+
+                        if len(wave_names) == 1:
+                            result = _run_feature(wave_names[0], env)
+                            all_results.append(result)
+                        else:
+                            # Parallel execution within wave
+                            with ThreadPoolExecutor(max_workers=len(wave_names)) as pool:
+                                futures = {
+                                    pool.submit(_run_feature, name, env): name
+                                    for name in wave_names
+                                }
+                                for future in as_completed(futures):
+                                    all_results.append(future.result())
+
+                        # Show wave results
+                        for r in all_results[-len(wave_names):]:
+                            status = f"{GREEN}✔" if r["success"] else f"{RED}✗"
+                            timeout_mark = " [TIMEOUT]" if r.get("timed_out") else ""
+                            print(
+                                f"    {status} {r['name']}: "
+                                f"{r['passed']}/{r['total']} features"
+                                f"{timeout_mark}{RESET} "
+                                f"({_format_duration(r['elapsed'])})"
+                            )
+
+                        # Inter-wave verification (skip for last wave)
+                        if wave_num < len(waves):
+                            print(f"\n  {DIM}Running inter-wave verification...{RESET}")
+                            try:
+                                test_results = _run_project_tests(Path.cwd())
+                                if test_results and test_results.get("failed", 0) > 0:
+                                    _log_test_failures_as_learnings(test_results)
+                                    print(
+                                        f"  {YELLOW}{test_results['failed']} test failure(s) — "
+                                        f"learnings injected for Wave {wave_num + 1}{RESET}"
+                                    )
+                                    _inject_context_into_claude_md()
+                                else:
+                                    print(f"  {GREEN}✔ Verification passed{RESET}")
+                            except Exception as exc:
+                                logger.debug("Inter-wave verification failed: %s", exc)
+
+                    timed_out = any(r.get("timed_out") for r in all_results)
+                    build_ok = True  # At least the pipeline ran
+                else:
+                    # No waves computed — fallback
+                    print(f"  {YELLOW}No teammates found — falling back to monolith build{RESET}")
+                    decomp_ok = False
+
+            if not decomp_ok:
+                # Fallback: original monolith build
+                print(f"  {DIM}Using single-process build (fallback){RESET}")
+                returncode, timed_out = _run_subprocess_with_timeout(
+                    ["claude", "--dangerously-skip-permissions",
+                     "-p", BUILD_PROMPT, "--output-format", "text"],
+                    env, timeout=_get_timeouts()[1],
+                )
+                build_ok = returncode == 0 and not timed_out
+
+        else:
+            # ── Workflow mode: features already generated, use fresh context ──
+            waves = _compute_waves(TEAMMATES_DIR)
+            if waves:
+                print(f"  {GREEN}workflow mode{RESET}: {sum(len(w) for w in waves)} agents in {len(waves)} wave(s)")
+                all_results = []
+
+                for wave_num, wave_names in enumerate(waves, 1):
+                    print(f"\n  {BOLD}Wave {wave_num}/{len(waves)}: {', '.join(wave_names)}{RESET}")
+
+                    if len(wave_names) == 1:
+                        result = _run_feature(wave_names[0], env)
+                        all_results.append(result)
+                    else:
+                        with ThreadPoolExecutor(max_workers=len(wave_names)) as pool:
+                            futures = {
+                                pool.submit(_run_feature, name, env): name
+                                for name in wave_names
+                            }
+                            for future in as_completed(futures):
+                                all_results.append(future.result())
+
+                    for r in all_results[-len(wave_names):]:
+                        status = f"{GREEN}✔" if r["success"] else f"{RED}✗"
+                        timeout_mark = " [TIMEOUT]" if r.get("timed_out") else ""
+                        print(
+                            f"    {status} {r['name']}: "
+                            f"{r['passed']}/{r['total']} features"
+                            f"{timeout_mark}{RESET} "
+                            f"({_format_duration(r['elapsed'])})"
+                        )
+
+                    if wave_num < len(waves):
+                        print(f"\n  {DIM}Running inter-wave verification...{RESET}")
+                        try:
+                            test_results = _run_project_tests(Path.cwd())
+                            if test_results and test_results.get("failed", 0) > 0:
+                                _log_test_failures_as_learnings(test_results)
+                                print(
+                                    f"  {YELLOW}{test_results['failed']} test failure(s) — "
+                                    f"learnings injected for Wave {wave_num + 1}{RESET}"
+                                )
+                                _inject_context_into_claude_md()
+                            else:
+                                print(f"  {GREEN}✔ Verification passed{RESET}")
+                        except Exception as exc:
+                            logger.debug("Inter-wave verification failed: %s", exc)
+
+                timed_out = any(r.get("timed_out") for r in all_results)
+                build_ok = True
+            else:
+                # Fallback: monolith
+                returncode, timed_out = _run_subprocess_with_timeout(
+                    ["claude", "--dangerously-skip-permissions",
+                     "-p", BUILD_PROMPT, "--output-format", "text"],
+                    env, timeout=_get_timeouts()[1],
+                )
+                build_ok = returncode == 0 and not timed_out
 
     except KeyboardInterrupt:
         print(f"\n{YELLOW}  Interrupted by user.{RESET}")
         stop_event.set()
-        # Kill Claude Code process group to avoid orphans
-        if proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                proc.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except OSError:
-                    pass
         monitor.join(timeout=3)
         _stop_observatory_live(observatory_proc)
         return False
@@ -2824,6 +3204,14 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
 
     build_elapsed = time.time() - build_start
     print()
+
+    # Extract learnings from commit metadata
+    try:
+        commit_learnings = _extract_commit_learnings()
+        if commit_learnings:
+            print(f"  {DIM}Extracted {len(commit_learnings)} learning(s) from commits{RESET}")
+    except Exception:
+        pass
 
     # Save git log as build record
     try:
@@ -2837,7 +3225,6 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(git_log.stdout)
     except Exception as e:
-        from forja.utils import logger
         logger.debug("git log: %s", e)
 
     # Stop observatory live
@@ -2851,12 +3238,10 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
             f"[TIMEOUT] {passed}/{total} features{blocked_note} after {_format_duration(build_elapsed)} "
             f"- continuing pipeline with partial results")
         build_ok = False
-    elif returncode == 0:
-        build_ok = True
+    elif build_ok:
         _phase_result(True, f"{passed}/{total} features{blocked_note} in {_format_duration(build_elapsed)}")
     else:
-        build_ok = False
-        _phase_result(False, f"exit {returncode} after {_format_duration(build_elapsed)}")
+        _phase_result(False, f"Build failed after {_format_duration(build_elapsed)}")
 
     _emit_event("phase.complete", {
         "phase": "build", "success": build_ok,
@@ -2864,62 +3249,93 @@ def _run_forja_inner(prd_path: str | None = None, *, preserve_build: bool = Fals
         "elapsed_seconds": int(build_elapsed), "timed_out": timed_out,
     })
 
-    # ── Phase 3: Server Health Smoke Test + Endpoint Probes ──
-    _phase_header(3, "Smoke Test & Endpoint Probes", 8)
-    smoke_result = _run_smoke_test()
-    if smoke_result["passed"]:
-        _phase_result(True, smoke_result.get("summary", "healthy"))
-    elif smoke_result.get("skill") == "unknown" or not smoke_result.get("port"):
-        pass  # Already printed "skipped" inside _run_smoke_test
-    else:
-        _phase_result(False, smoke_result.get("summary", "server not healthy"))
+    # ── Post-build phases (informational — never block the pipeline) ──
+    # Wrapped in try/except so a crash in any phase never prevents
+    # the observatory from opening or the final summary from printing.
 
-    # Show probe summary if probes ran
-    probe_sum = smoke_result.get("probe_summary", {})
-    if probe_sum.get("total", 0) > 0:
-        p_total = probe_sum["total"]
-        p_passed = probe_sum["passed"]
-        p_rate = probe_sum.get("pass_rate", 0)
-        color = GREEN if p_rate >= 70 else RED
-        _phase_result(
-            p_rate >= 70,
-            f"{color}{p_rate:.0f}% endpoints verified{RESET} ({p_passed}/{p_total} probes passed)",
-        )
-    _emit_event("phase.complete", {"phase": "Smoke Test", "success": smoke_result["passed"]})
+    try:
+        # ── Phase 3: Server Health Smoke Test + Endpoint Probes ──
+        _phase_header(3, "Smoke Test & Endpoint Probes", 8)
+        smoke_result = _run_smoke_test()
+        if smoke_result["passed"]:
+            _phase_result(True, smoke_result.get("summary", "healthy"))
+        elif smoke_result.get("skill") == "unknown" or not smoke_result.get("port"):
+            pass  # Already printed "skipped" inside _run_smoke_test
+        else:
+            _phase_result(False, smoke_result.get("summary", "server not healthy"))
 
-    # ── Phase 4: Project Tests (informational) ──
-    _phase_header(4, "Project Tests", 8)
-    test_results = _run_project_tests(Path.cwd())
-    _log_test_failures_as_learnings(test_results)
-    _emit_event("phase.complete", {"phase": "Project Tests", "success": test_results.get("exit_code", -1) == 0})
+        # Show probe summary if probes ran
+        probe_sum = smoke_result.get("probe_summary", {})
+        if probe_sum.get("total", 0) > 0:
+            p_total = probe_sum["total"]
+            p_passed = probe_sum["passed"]
+            p_rate = probe_sum.get("pass_rate", 0)
+            color = GREEN if p_rate >= 70 else RED
+            _phase_result(
+                p_rate >= 70,
+                f"{color}{p_rate:.0f}% endpoints verified{RESET} ({p_passed}/{p_total} probes passed)",
+            )
+        _emit_event("phase.complete", {"phase": "Smoke Test", "success": smoke_result["passed"]})
+    except Exception as exc:
+        logger.debug("Phase 3 (Smoke Test) failed: %s", exc)
+        print(f"  {YELLOW}Smoke test skipped due to error{RESET}")
 
-    # ── Phase 5: Visual Evaluation (informational) ──
-    _phase_header(5, "Visual Evaluation", 8)
-    _run_visual_eval(str(prd))
-    _emit_event("phase.complete", {"phase": "Visual Evaluation", "success": True})
+    try:
+        # ── Phase 4: Project Tests (informational) ──
+        _phase_header(4, "Project Tests", 8)
+        test_results = _run_project_tests(Path.cwd())
+        _log_test_failures_as_learnings(test_results)
+        _emit_event("phase.complete", {"phase": "Project Tests", "success": test_results.get("exit_code", -1) == 0})
+    except Exception as exc:
+        logger.debug("Phase 4 (Project Tests) failed: %s", exc)
+        print(f"  {YELLOW}Project tests skipped due to error{RESET}")
 
-    # ── Phase 6: Outcome Evaluation (informational) ──
-    _phase_header(6, "Outcome Evaluation", 8)
-    _run_outcome(str(prd))
-    _persist_outcome_gaps()
-    _emit_event("phase.complete", {"phase": "Outcome Evaluation", "success": True})
+    try:
+        # ── Phase 5: Visual Evaluation (informational) ──
+        _phase_header(5, "Visual Evaluation", 8)
+        _run_visual_eval(str(prd))
+        _emit_event("phase.complete", {"phase": "Visual Evaluation", "success": True})
+    except Exception as exc:
+        logger.debug("Phase 5 (Visual Eval) failed: %s", exc)
+        print(f"  {YELLOW}Visual evaluation skipped due to error{RESET}")
 
-    # ── Phase 7: Extract Learnings (informational) ──
-    _phase_header(7, "Extract Learnings", 8)
-    _run_learnings_extract()
-    _run_learnings_apply()
-    _run_learnings_synthesize()
-    _emit_event("phase.complete", {"phase": "Extract Learnings", "success": True})
+    try:
+        # ── Phase 6: Outcome Evaluation (informational) ──
+        _phase_header(6, "Outcome Evaluation", 8)
+        _run_outcome(str(prd))
+        _persist_outcome_gaps()
+        _emit_event("phase.complete", {"phase": "Outcome Evaluation", "success": True})
+    except Exception as exc:
+        logger.debug("Phase 6 (Outcome) failed: %s", exc)
+        print(f"  {YELLOW}Outcome evaluation skipped due to error{RESET}")
 
-    # ── Phase 8: Observatory (informational) ──
-    _phase_header(8, "Observatory Report", 8)
-    _run_observatory()
-    _emit_event("phase.complete", {"phase": "Observatory Report", "success": True})
+    try:
+        # ── Phase 7: Extract Learnings (informational) ──
+        _phase_header(7, "Extract Learnings", 8)
+        _run_learnings_extract()
+        _run_learnings_apply()
+        _run_learnings_synthesize()
+        _emit_event("phase.complete", {"phase": "Extract Learnings", "success": True})
+    except Exception as exc:
+        logger.debug("Phase 7 (Learnings) failed: %s", exc)
+        print(f"  {YELLOW}Learnings extraction skipped due to error{RESET}")
+
+    try:
+        # ── Phase 8: Observatory (informational) ──
+        _phase_header(8, "Observatory Report", 8)
+        _run_observatory()
+        _emit_event("phase.complete", {"phase": "Observatory Report", "success": True})
+    except Exception as exc:
+        logger.debug("Phase 8 (Observatory) failed: %s", exc)
+        print(f"  {YELLOW}Observatory report skipped due to error{RESET}")
 
     # ── Save iteration changelog ──
-    _save_iteration_log(pipeline_start, total, passed, blocked, build_elapsed)
+    try:
+        _save_iteration_log(pipeline_start, total, passed, blocked, build_elapsed)
+    except Exception as exc:
+        logger.debug("Iteration log failed: %s", exc)
 
-    # ── Auto-open output ──
+    # ── Auto-open output (always runs, even if phases above crashed) ──
     cfg = load_config()
     if cfg.build.auto_open:
         _auto_open_output()
@@ -3244,13 +3660,12 @@ def _synthesize_decisions(
     )
 
     try:
-        raw = call_llm(
+        raw = _call_claude_code(
             prompt,
             system=(
                 "You are an expert at crystallizing decisions from discussions. "
                 "Extract clear, actionable decisions. Respond only with valid JSON."
             ),
-            provider="anthropic",
         )
     except Exception as exc:
         logger.debug("Decision synthesis LLM call failed: %s", exc)
@@ -3359,10 +3774,10 @@ def _improve_prd_with_context(prd_text: str, iteration_context: str, user_feedba
         )
 
     try:
-        result = call_llm(
+        result = _call_claude_code(
             prompt,
             system="\n".join(system_parts),
-            provider="anthropic",
+            timeout=180,
         )
     except Exception:
         result = ""
@@ -3457,10 +3872,10 @@ def _improve_specs_with_context(
         )
 
     try:
-        result = call_llm(
+        result = _call_claude_code(
             prompt,
             system="\n".join(system_parts),
-            provider="anthropic",
+            timeout=180,
         )
     except Exception as exc:
         logger.debug("Multi-spec improvement LLM call failed: %s", exc)
@@ -3495,6 +3910,257 @@ def _improve_specs_with_context(
             logger.warning("LLM returned unknown spec path: %s", path)
 
     return improved
+
+
+# ── Claude Code enrichment (agentic PRD improvement) ─────────────
+
+
+ENRICHMENT_INSTRUCTIONS_PATH = FORJA_DIR / "enrichment-instructions.md"
+
+
+def _write_enrichment_instructions(
+    spec_paths: list[Path],
+    iteration_context: str,
+    user_feedback: str,
+    decisions: list[dict] | None = None,
+) -> None:
+    """Write enrichment instructions file for Claude Code to read.
+
+    Creates ``.forja/enrichment-instructions.md`` with the full enrichment
+    plan: spec file list, build results, feedback, decisions, and rules.
+    """
+    enriched = _enrich_feedback(user_feedback)
+    decisions_text = _format_decisions_for_prd_edit(decisions) if decisions else ""
+
+    # Read README for product voice context
+    readme_context = ""
+    readme_path = Path("README.md")
+    if readme_path.exists():
+        try:
+            lines = readme_path.read_text(encoding="utf-8").splitlines()[:60]
+            readme_context = "\n".join(lines)
+        except OSError:
+            pass
+
+    spec_list = "\n".join(f"- {p}" for p in spec_paths)
+
+    instructions = (
+        "# PRD Enrichment Instructions\n\n"
+        "You are a PRD enrichment editor. Your job is to make specs GROW in "
+        "specificity and detail with each iteration. You NEVER delete content "
+        "unless explicitly told to descope something.\n\n"
+        f"## Files to Edit\n{spec_list}\n\n"
+        f"## Build Results\n{iteration_context}\n\n"
+        f"## User Feedback\n{enriched}\n\n"
+    )
+
+    if decisions_text:
+        instructions += f"{decisions_text}\n\n"
+
+    instructions += (
+        "## Enrichment Rules\n"
+        "1. EDIT the spec files listed above IN PLACE.\n"
+        "2. For 'ENRICH' decisions: ADD paragraphs, bullets, acceptance "
+        "criteria to the target section. Do NOT rewrite existing text — "
+        "append below it.\n"
+        "3. For 'DETAIL' decisions: Expand vague descriptions with specific "
+        "implementation notes, file paths, function signatures, data "
+        "structures.\n"
+        "4. For 'CONSTRAIN' decisions: Add a '### Constraints' subsection or "
+        "bullet to the target.\n"
+        "5. For 'FIX' decisions: Modify the specific incorrect statement.\n"
+        "6. For 'DESCOPE' decisions: Move the feature to an '## Out of Scope' "
+        "section at the bottom — include the rationale. Do NOT delete.\n"
+        "7. The output specs MUST be LONGER and MORE DETAILED than the input.\n"
+        "8. Every existing sentence must be preserved unless directly "
+        "contradicted by a decision.\n"
+        "9. When a feature failed, ADD specificity about HOW it should be "
+        "built.\n"
+        "10. Do NOT invent features the user didn't ask for.\n"
+        "11. Do NOT create new files.\n"
+    )
+
+    if readme_context:
+        instructions += (
+            f"\n## Product Voice\nMatch this README's voice — direct, "
+            f"technical, for developers:\n```\n{readme_context}\n```\n"
+        )
+
+    ENRICHMENT_INSTRUCTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ENRICHMENT_INSTRUCTIONS_PATH.write_text(instructions, encoding="utf-8")
+
+
+def _improve_prd_with_claude_code(
+    spec_paths: list[Path],
+    iteration_context: str,
+    user_feedback: str,
+    decisions: list[dict] | None = None,
+    timeout_seconds: int = 300,
+) -> bool:
+    """Enrich specs using Claude Code CLI (agentic, filesystem-aware).
+
+    Claude Code edits spec files IN PLACE on disk. Returns ``True`` if
+    Claude Code completed successfully, ``False`` otherwise.
+
+    The caller is responsible for snapshotting spec contents before and
+    comparing after to detect what changed.
+    """
+    # 1. Write enrichment instructions file
+    _write_enrichment_instructions(
+        spec_paths, iteration_context, user_feedback, decisions,
+    )
+
+    # 2. Run Claude Code CLI
+    env = os.environ.copy()
+
+    try:
+        proc = subprocess.Popen(
+            [
+                "claude",
+                "--dangerously-skip-permissions",
+                "-p", ENRICHMENT_PROMPT,
+                "--output-format", "text",
+            ],
+            env=env,
+            preexec_fn=os.setsid,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            logger.debug(
+                "Claude Code enrichment stdout: %s",
+                stdout.decode(errors="replace")[:2000] if stdout else "",
+            )
+            if proc.returncode != 0:
+                logger.warning(
+                    "Claude Code enrichment exited with code %d: %s",
+                    proc.returncode,
+                    stderr.decode(errors="replace")[:500] if stderr else "",
+                )
+            return proc.returncode == 0
+
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Claude Code enrichment timed out after %ds", timeout_seconds,
+            )
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=10)
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait(timeout=5)
+                except OSError:
+                    pass
+            return False
+
+    except FileNotFoundError:
+        logger.info("Claude Code CLI not found, cannot use for enrichment")
+        return False
+    except OSError as exc:
+        logger.warning("Failed to run Claude Code for enrichment: %s", exc)
+        return False
+    finally:
+        # Clean up instructions file
+        try:
+            ENRICHMENT_INSTRUCTIONS_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _improve_specs_unified(
+    spec_paths: list[Path],
+    specs: dict[str, str],
+    iteration_context: str,
+    user_feedback: str,
+    decisions: list[dict] | None = None,
+) -> tuple[dict[str, str], bool]:
+    """Improve specs using Claude Code CLI, falling back to call_llm().
+
+    Returns ``(changed_specs_dict, already_on_disk)`` where:
+
+    - *changed_specs_dict*: ``{relative_path: new_content}`` for files
+      that changed.  Empty dict means no changes.
+    - *already_on_disk*: ``True`` if Claude Code already wrote the files
+      (caller should NOT re-write them), ``False`` if the caller must
+      write the returned content to disk.
+    """
+    # Try Claude Code CLI first
+    if shutil.which("claude") is not None:
+        print(f"  {DIM}Enriching specs via Claude Code agent...{RESET}")
+
+        # Snapshot before Claude Code modifies files
+        old_contents: dict[str, str] = {}
+        for p in spec_paths:
+            try:
+                old_contents[str(p)] = p.read_text(encoding="utf-8")
+            except OSError:
+                pass
+
+        cfg = load_config()
+        timeout = cfg.build.enrichment_timeout_seconds
+
+        success = _improve_prd_with_claude_code(
+            spec_paths, iteration_context, user_feedback, decisions,
+            timeout_seconds=timeout,
+        )
+
+        if success:
+            # Read after and diff
+            changed: dict[str, str] = {}
+            for p in spec_paths:
+                try:
+                    new_content = p.read_text(encoding="utf-8")
+                    key = str(p)
+                    if key in old_contents and new_content.strip() != old_contents[key].strip():
+                        changed[key] = new_content
+                except OSError:
+                    pass
+
+            if changed:
+                print(
+                    f"  {GREEN}Claude Code enriched "
+                    f"{len(changed)} spec file(s){RESET}",
+                )
+                return changed, True
+
+            logger.info(
+                "Claude Code ran but made no changes, falling back to LLM API",
+            )
+        else:
+            # Restore originals in case Claude Code partially wrote
+            for p in spec_paths:
+                key = str(p)
+                if key in old_contents:
+                    try:
+                        current = p.read_text(encoding="utf-8")
+                        if current != old_contents[key]:
+                            p.write_text(old_contents[key], encoding="utf-8")
+                            logger.info("Restored %s after failed enrichment", key)
+                    except OSError:
+                        pass
+            logger.info("Claude Code enrichment failed, falling back to LLM API")
+
+    # Fallback: existing call_llm() path
+    print(f"  {DIM}Enriching specs via LLM API...{RESET}")
+
+    if len(specs) > 1:
+        result = _improve_specs_with_context(
+            specs, iteration_context, user_feedback, decisions,
+        )
+        return result, False
+
+    # Single-file mode
+    path = list(specs.keys())[0]
+    prd_text = specs[path]
+    improved = _improve_prd_with_context(
+        prd_text, iteration_context, user_feedback, decisions,
+    )
+    if improved and improved.strip() != prd_text.strip():
+        return {path: improved}, False
+    return {}, False
 
 
 def _save_multi_spec_snapshot(
@@ -3746,10 +4412,13 @@ def _evaluate_quality_gates(
     verification_pct = int(verified_gates / total_gates * 100) if total_gates > 0 else 0
 
     # all_pass is TRUE only when verified gates pass AND at least 2 gates were actually tested
+    MIN_VERIFIED_GATES = 2  # coverage + features are always verified
     verified_all_pass = coverage_ok and tests_ok and features_ok and visual_ok and smoke_ok and probes_ok
+    all_pass = verified_all_pass and verified_gates >= MIN_VERIFIED_GATES
 
     return {
-        "all_pass": verified_all_pass,
+        "all_pass": all_pass,
+        "min_verified": MIN_VERIFIED_GATES,
         "verification_completeness": {
             "total_gates": total_gates,
             "verified": verified_gates,
@@ -3872,6 +4541,10 @@ def _print_gate_results(gates: dict, iteration: int) -> None:
     if vc.get("skipped", 0) > 0:
         skipped_names = ", ".join(vc.get("skipped_names", []))
         print(f"    {YELLOW}⚠ Verification: {vc['verified']}/{vc['total_gates']} gates verified ({vc['pct']}%) — skipped: {skipped_names}{RESET}")
+
+    min_req = gates.get("min_verified", 2)
+    if vc.get("verified", 0) < min_req and not gates.get("all_pass"):
+        print(f"    {RED}⚠ all_pass blocked: only {vc.get('verified', 0)} gate(s) verified (minimum: {min_req}){RESET}")
 
     if gates["unmet"]:
         preview = ", ".join(str(r)[:40] for r in gates["unmet"][:3])
@@ -4015,7 +4688,7 @@ def _generate_auto_feedback(gates: dict, prd_path: Path | None = None) -> str:
     )
 
     try:
-        return call_llm(
+        return _call_claude_code(
             prompt,
             system="You are a build iteration advisor. Be concise and actionable.",
         )
@@ -4031,6 +4704,20 @@ def _generate_auto_feedback(gates: dict, prd_path: Path | None = None) -> str:
             f"Resolve {test_fails} test failures. "
             f"Complete {feat_total - feat_passed} incomplete features."
         )
+
+
+def _is_stagnant(prev: dict, current: dict) -> bool:
+    """Return True when no metric improved between iterations.
+
+    Each dict must have keys: ``coverage`` (float), ``features_pct``
+    (float), and ``tests_failed`` (int).  Stagnation means coverage
+    didn't increase, feature-pass % didn't increase, **and** test
+    failures didn't decrease.
+    """
+    coverage_improved = current["coverage"] > prev["coverage"]
+    features_improved = current["features_pct"] > prev["features_pct"]
+    tests_improved = current["tests_failed"] < prev["tests_failed"]
+    return not (coverage_improved or features_improved or tests_improved)
 
 
 def run_auto_forja(
@@ -4066,8 +4753,9 @@ def run_auto_forja(
     print(f"  Expert panels:   {'ON' if cfg.build.auto_expert_panels else 'OFF'}")
     print()
 
-    prev_coverage: float = -1  # Track coverage across iterations for stagnation detection
-    stagnant_count = 0         # Consecutive iterations with no coverage improvement
+    prev_metrics = {"coverage": -1.0, "features_pct": -1.0, "tests_failed": -1}
+    stagnant_count = 0   # Consecutive iterations with no metric improvement
+    no_change_count = 0  # Consecutive iterations where specs didn't change
 
     for iteration in range(1, max_iters + 1):
         print(f"\n  {'─' * 50}")
@@ -4091,7 +4779,11 @@ def run_auto_forja(
         gates = _evaluate_quality_gates(cfg, coverage_target=cov_target)
         _print_gate_results(gates, iteration)
 
-        current_coverage = gates["coverage"]["value"]
+        current_metrics = {
+            "coverage": gates["coverage"]["value"],
+            "features_pct": gates["features"]["pct"],
+            "tests_failed": gates["tests"]["failed"],
+        }
 
         if gates["all_pass"]:
             print(
@@ -4103,25 +4795,33 @@ def run_auto_forja(
         if iteration >= max_iters:
             print(
                 f"\n  {YELLOW}{BOLD}Max iterations ({max_iters}) reached. "
-                f"Best coverage: {current_coverage}%{RESET}\n"
+                f"Best coverage: {current_metrics['coverage']}%{RESET}\n"
             )
             return False
 
-        # ── Stagnation detection ──
-        if current_coverage <= prev_coverage and prev_coverage >= 0:
+        # ── Stagnation detection (multi-metric) ──
+        if prev_metrics["coverage"] >= 0 and _is_stagnant(prev_metrics, current_metrics):
             stagnant_count += 1
             if stagnant_count >= 2:
                 print(
-                    f"\n  {YELLOW}{BOLD}Stagnation detected: coverage has not improved "
-                    f"for {stagnant_count} iterations ({current_coverage}%). "
+                    f"\n  {YELLOW}{BOLD}Stagnation detected: no metric improved "
+                    f"for {stagnant_count} iterations "
+                    f"(cov={current_metrics['coverage']}%, "
+                    f"feat={current_metrics['features_pct']}%, "
+                    f"fails={current_metrics['tests_failed']}). "
                     f"Stopping to avoid wasted cycles.{RESET}\n"
                 )
                 return False
-            print(f"  {YELLOW}No coverage improvement ({current_coverage}%), "
-                  f"will try {2 - stagnant_count} more time(s) before stopping{RESET}")
+            print(
+                f"  {YELLOW}No metric improvement "
+                f"(cov={current_metrics['coverage']}%, "
+                f"feat={current_metrics['features_pct']}%, "
+                f"fails={current_metrics['tests_failed']}), "
+                f"will try {2 - stagnant_count} more time(s) before stopping{RESET}"
+            )
         else:
             stagnant_count = 0
-        prev_coverage = current_coverage
+        prev_metrics = current_metrics
 
         # ── Generate feedback from failures ──
         print(f"\n  {DIM}Generating feedback from failures...{RESET}")
@@ -4164,38 +4864,45 @@ def run_auto_forja(
             except Exception:
                 pass  # Expert panels are optional, never block
 
-        # Improve specs (multi-spec or single-file)
-        if len(specs) > 1:
-            improved = _improve_specs_with_context(
-                specs, iteration_context, enriched_feedback,
+        # Improve specs (Claude Code agent with LLM API fallback)
+        improved, on_disk = _improve_specs_unified(
+            spec_paths, specs, iteration_context, enriched_feedback,
+        )
+        if improved:
+            no_change_count = 0
+            # Log diff size so user can gauge whether changes are meaningful
+            diff_size = sum(
+                abs(len(improved[k]) - len(specs.get(k, "")))
+                for k in improved
             )
-            if improved:
-                run_num = _next_iteration_number()
+            print(f"  {DIM}Spec diff size: ~{diff_size} chars across {len(improved)} file(s){RESET}")
+
+            run_num = _next_iteration_number()
+            if len(improved) > 1 or len(specs) > 1:
                 _save_multi_spec_snapshot(
                     run_num, enriched_feedback, specs, improved,
                 )
+            else:
+                path_key = list(improved.keys())[0]
+                old_text = specs.get(path_key, "")
+                _save_iteration_snapshot(
+                    run_num, enriched_feedback, old_text, improved[path_key],
+                )
+            if not on_disk:
                 for rel_path, new_content in improved.items():
                     Path(rel_path).write_text(
                         new_content + "\n", encoding="utf-8",
                     )
-                print(f"  {GREEN}Updated {len(improved)} spec file(s){RESET}")
-            else:
-                print(f"  {YELLOW}No spec changes generated, re-running with learnings{RESET}")
+            print(f"  {GREEN}Updated {len(improved)} spec file(s){RESET}")
         else:
-            # Single-file mode
-            prd_text = prd.read_text(encoding="utf-8")
-            improved_prd = _improve_prd_with_context(
-                prd_text, iteration_context, enriched_feedback,
-            )
-            if improved_prd and improved_prd.strip() != prd_text.strip():
-                run_num = _next_iteration_number()
-                _save_iteration_snapshot(
-                    run_num, enriched_feedback, prd_text, improved_prd,
+            no_change_count += 1
+            if no_change_count >= 2:
+                print(
+                    f"\n  {YELLOW}{BOLD}Specs unchanged for {no_change_count} consecutive "
+                    f"iterations — LLM is stuck. Stopping to avoid wasted cycles.{RESET}\n"
                 )
-                prd.write_text(improved_prd + "\n", encoding="utf-8")
-                print(f"  {GREEN}PRD updated{RESET}")
-            else:
-                print(f"  {YELLOW}No PRD changes, re-running with learnings{RESET}")
+                return False
+            print(f"  {YELLOW}No spec changes generated, re-running with learnings{RESET}")
 
         # Apply learnings before next iteration
         _run_learnings_apply()
@@ -4419,52 +5126,51 @@ def run_iterate(prd_path: str | None = None) -> bool:
         if tech_findings:
             enriched_feedback += "\n\n" + tech_findings
 
+        # ── Unified enrichment (Claude Code agent → LLM API fallback) ──
+        improved_specs, on_disk = _improve_specs_unified(
+            spec_paths, specs, iteration_context, enriched_feedback,
+            decisions=decisions,
+        )
+
+        if not improved_specs:
+            print(f"  {YELLOW}No spec changes generated. Aborting.{RESET}")
+            return False
+
+        # ── Show per-file change summary ──
+        print(f"\n  {BOLD}── Enrichment Summary ──{RESET}")
+        total_delta = 0
+        for path, new_content in improved_specs.items():
+            old_content = specs.get(path, "")
+            old_lines = len(old_content.splitlines())
+            new_lines = len(new_content.splitlines())
+            delta = new_lines - old_lines
+            total_delta += delta
+            delta_str = f"+{delta}" if delta >= 0 else str(delta)
+            color = GREEN if delta >= 0 else RED
+            print(f"    {color}M{RESET} {path} ({old_lines} → {new_lines} lines, {delta_str})")
+
+        unchanged = len(specs) - len(improved_specs)
+        if unchanged > 0:
+            print(f"    {DIM}{unchanged} file(s) unchanged{RESET}")
+
+        # ── Richness guard ──
+        if total_delta < 0 and descope_count < 3:
+            print(f"    {YELLOW}⚠ PRD shrank by {abs(total_delta)} lines without major descoping!{RESET}")
+        elif total_delta > 0:
+            print(f"    {GREEN}✓ PRD grew by +{total_delta} lines (richer){RESET}")
+        print()
+
+        # ── Preview first changed file ──
+        first_path = list(improved_specs.keys())[0]
+        preview = improved_specs[first_path][:600]
+        if len(improved_specs[first_path]) > 600:
+            preview += "\n..."
+        print(f"  {BOLD}── Preview: {first_path} ──{RESET}")
+        for line in preview.splitlines():
+            print(f"  {line}")
+
         if is_multi_spec:
-            # ── Multi-spec enrichment ──
-            print(f"\n  {DIM}Enriching {len(specs)} spec files...{RESET}")
-            improved_specs = _improve_specs_with_context(
-                specs, iteration_context, enriched_feedback,
-                decisions=decisions,
-            )
-
-            if not improved_specs:
-                print(f"  {YELLOW}No spec changes generated. Aborting.{RESET}")
-                return False
-
-            # ── Show per-file change summary ──
-            print(f"\n  {BOLD}── Enrichment Summary ──{RESET}")
-            total_delta = 0
-            for path, new_content in improved_specs.items():
-                old_content = specs.get(path, "")
-                old_lines = len(old_content.splitlines())
-                new_lines = len(new_content.splitlines())
-                delta = new_lines - old_lines
-                total_delta += delta
-                delta_str = f"+{delta}" if delta >= 0 else str(delta)
-                color = GREEN if delta >= 0 else RED
-                print(f"    {color}M{RESET} {path} ({old_lines} → {new_lines} lines, {delta_str})")
-
-            unchanged = len(specs) - len(improved_specs)
-            if unchanged > 0:
-                print(f"    {DIM}{unchanged} file(s) unchanged{RESET}")
-
-            # ── Richness guard ──
-            if total_delta < 0 and descope_count < 3:
-                print(f"    {YELLOW}⚠ PRD shrank by {abs(total_delta)} lines without major descoping!{RESET}")
-            elif total_delta > 0:
-                print(f"    {GREEN}✓ PRD grew by +{total_delta} lines (richer){RESET}")
-            print()
-
-            # ── Preview first changed file ──
-            first_path = list(improved_specs.keys())[0]
-            preview = improved_specs[first_path][:600]
-            if len(improved_specs[first_path]) > 600:
-                preview += "\n..."
-            print(f"  {BOLD}── Preview: {first_path} ──{RESET}")
-            for line in preview.splitlines():
-                print(f"  {line}")
-
-            # ── Accept or abort ──
+            # ── Accept or abort (multi-spec) ──
             print(f"\n  {BOLD}Options:{RESET}")
             print(f"    {GREEN}(1){RESET} Accept enriched specs and re-run")
             print(f"    {DIM}(2){RESET} Abort")
@@ -4475,72 +5181,59 @@ def run_iterate(prd_path: str | None = None) -> bool:
                 sub_choice = input(f"  {BOLD}>{RESET} ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
+                # Rollback if Claude Code already wrote
+                if on_disk:
+                    for path_k, old_content in specs.items():
+                        Path(path_k).write_text(old_content, encoding="utf-8")
                 return False
 
             if sub_choice != "1":
                 print(f"\n  {DIM}Aborted.{RESET}\n")
+                # Rollback if Claude Code already wrote
+                if on_disk:
+                    for path_k, old_content in specs.items():
+                        Path(path_k).write_text(old_content, encoding="utf-8")
                 return False
 
-            # ── Save multi-spec snapshot ──
-            new_specs = dict(specs)
-            new_specs.update(improved_specs)
+            # ── Save snapshot ──
+            new_specs_all = dict(specs)
+            new_specs_all.update(improved_specs)
 
             _save_multi_spec_snapshot(
                 run_number=_next_iteration_number(),
                 feedback_text=feedback,
                 old_specs=specs,
-                new_specs=new_specs,
+                new_specs=new_specs_all,
             )
 
-            # ── Write changed files ──
-            for path, content in improved_specs.items():
-                p = Path(path)
-                p.write_text(content + "\n", encoding="utf-8")
-                print(f"  {GREEN}Saved: {path}{RESET}")
+            # ── Write changed files (only if not already on disk) ──
+            if not on_disk:
+                for path_s, content in improved_specs.items():
+                    p = Path(path_s)
+                    p.write_text(content + "\n", encoding="utf-8")
+                    print(f"  {GREEN}Saved: {path_s}{RESET}")
+            else:
+                for path_s in improved_specs:
+                    print(f"  {GREEN}Saved: {path_s}{RESET}")
 
         else:
-            # ── Single-file mode (backward compatible) ──
-            prd_text = (
-                list(specs.values())[0] if specs
-                else prd.read_text(encoding="utf-8")
-            )
+            # ── Single-file mode: interactive review ──
+            prd_text = list(specs.values())[0] if specs else prd.read_text(encoding="utf-8")
+            improved_text = improved_specs[list(improved_specs.keys())[0]]
 
-            print(f"\n  {DIM}Enriching PRD...{RESET}")
-            improved = _improve_prd_with_context(
-                prd_text, iteration_context, enriched_feedback,
-                decisions=decisions,
-            )
-
-            # ── Richness guard ──
-            old_lines = len(prd_text.splitlines())
-            new_lines = len(improved.splitlines())
-            delta = new_lines - old_lines
-            if delta < 0 and descope_count < 3:
-                print(f"  {YELLOW}⚠ PRD shrank by {abs(delta)} lines — may have lost detail{RESET}")
-            elif delta > 0:
-                print(f"  {GREEN}✓ PRD grew by +{delta} lines (richer){RESET}")
-
-            # ── Show what changed ──
-            print(f"\n  {BOLD}── Enriched PRD (preview) ──{RESET}")
-            preview = improved[:800]
-            if len(improved) > 800:
-                preview += "\n..."
-            for line in preview.splitlines():
-                print(f"  {line}")
-
-            # ── Interactive review (reuse planner's edit loop) ──
-            improved = _interactive_prd_edit(improved)
+            # If Claude Code already wrote, let user still do interactive review
+            improved_text = _interactive_prd_edit(improved_text)
 
             # ── Save iteration snapshot ──
             _save_iteration_snapshot(
                 run_number=_next_iteration_number(),
                 feedback_text=feedback,
                 old_prd=prd_text,
-                new_prd=improved,
+                new_prd=improved_text,
             )
 
-            # ── Save ──
-            prd.write_text(improved + "\n", encoding="utf-8")
+            # ── Save (always write since interactive edit may have changed) ──
+            prd.write_text(improved_text + "\n", encoding="utf-8")
             print(f"\n  {GREEN}PRD saved to {prd}{RESET}")
 
     elif choice == "2":

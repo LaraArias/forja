@@ -98,8 +98,18 @@ Maximum 2KB. Include:
 - Instruction: "When you think a feature is ready, run: python3 .forja-tools/forja_features.py attempt [id] --dir context/teammates/[name]/. If validation passes, run: python3 .forja-tools/forja_features.py pass [id] --dir context/teammates/[name]/ --evidence 'brief proof: e.g. tests pass, endpoint returns 201, curl verified'"
 - Instruction: "When you finish a task, read features.json. If there are features with status other than 'passed', work on the next one. Do not stop until all have status 'passed'."
 - Instruction: "Do not ask for human confirmation. If 2 approaches fail, escalate to the lead."
-- Instruction: "Commit after each task: git commit --author='teammate-[name] <[name]@forja>' -m '[message]'"
+- Instruction: "Commit after each task with structured metadata: git commit --author='teammate-[name] <[name]@forja>' -m '[feature-{id}] {message}\n\nObjective: {what this commit achieves}\nLearnings: {dependencies discovered, patterns that worked/failed, or N/A}\nResult: {passed|failed|partial} — {brief evidence}\nFeature: {feature description}'"
 - Instruction: "Use forja_context.py to persist important decisions from your epic: python3 .forja-tools/forja_context.py set [name]-decisions.[key] '[value]' --author teammate-[name]"
+
+### Teammate context.md
+
+For each teammate, create context/teammates/[name]/context.md containing ONLY:
+- The sections of the PRD relevant to this epic
+- Design system context (if the epic involves UI)
+- Domain context relevant to this epic's audience
+- Any relevant planning decisions from the Shared Context section
+
+Maximum 3000 characters per teammate context. Do NOT dump all context into every teammate — each teammate should receive only what it needs.
 
 ## Step 5: Generate QA Teammate
 
@@ -118,6 +128,8 @@ Create context/teammate_map.json mapping src/ directories to teammate names:
 
 Run: python3 .forja-tools/forja_preflight.py --post-plan
 If it fails, fix before continuing.
+
+**IMPORTANT**: If the prompt that launched you says "stop after generating all artifacts" or mentions "ONLY Steps 0-7", your job is DONE here. Do NOT proceed to Step 8. The runner will handle execution separately with fresh context per feature.
 
 ## Step 8: Create Agent Team
 

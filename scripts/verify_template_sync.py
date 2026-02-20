@@ -19,7 +19,7 @@ from pathlib import Path
 CLI_UTILS = Path("src/forja/utils.py")
 TPL_UTILS = Path("src/forja/templates/forja_utils.py")
 
-CRITICAL_FUNCTIONS = ["parse_json", "load_dotenv", "read_feature_status"]
+CRITICAL_FUNCTIONS = ["parse_json", "load_dotenv", "read_feature_status", "_call_claude_code"]
 CRITICAL_CLASSES = ["Feature"]
 
 

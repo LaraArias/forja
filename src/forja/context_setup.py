@@ -18,7 +18,7 @@ from forja.utils import (
     RESET,
     PASS_ICON,
     WARN_ICON,
-    call_llm,
+    _call_claude_code,
     load_dotenv,
     parse_json,
 )
@@ -179,7 +179,7 @@ def _setup_company(target: Path) -> tuple[str | None, str | None]:
     if not docs_path or not Path(docs_path).exists():
         print(f"  {DIM}Generating company overview...{RESET}")
         try:
-            raw = call_llm(
+            raw = _call_claude_code(
                 f"Generate a concise company overview for a software project. "
                 f"Company: {name}. Description: {desc}. "
                 f"Include: what the company does, target market, key differentiators, tech philosophy. "
@@ -192,8 +192,6 @@ def _setup_company(target: Path) -> tuple[str | None, str | None]:
                     "'[TO BE DEFINED]' instead of inventing. Never fabricate testimonials, "
                     "quotes, or evidence."
                 ),
-                provider="anthropic",
-                max_retries=0,
             )
         except Exception:
             raw = ""
@@ -239,7 +237,7 @@ def _setup_domain(target: Path, name: str, desc: str) -> str | None:
 
     print(f"  {DIM}Generating domain context...{RESET}")
     try:
-        raw = call_llm(
+        raw = _call_claude_code(
             f"Generate domain context files for a {audience_label} software project.\n"
             f"Company: {name} - {desc}\n"
             f"Audience: {audience_label}\n"
@@ -265,8 +263,6 @@ def _setup_domain(target: Path, name: str, desc: str) -> str | None:
                 "Do NOT invent metrics, statistics, benchmarks, quotes, user counts, "
                 "or any specific numerical claims. If data is missing, write '[NEEDS DATA]'."
             ),
-            provider="anthropic",
-            max_retries=0,
         )
     except Exception:
         raw = ""
@@ -413,7 +409,7 @@ def _setup_design_system(target: Path, name: str) -> None:
     # Generate DESIGN-REFERENCE.md via Anthropic
     print(f"  {DIM}Generating design reference...{RESET}")
     try:
-        raw = call_llm(
+        raw = _call_claude_code(
             f"Generate a design reference guide for a {style_label} landing page. "
             f"Primary color: {primary}. Secondary/accent: {secondary}. Font: {font}. "
             f"Include: color palette with CSS variables, typography scale, layout patterns "
@@ -423,8 +419,6 @@ def _setup_design_system(target: Path, name: str) -> None:
             f"Format as markdown. Max 80 lines.",
             system="You respond only with the requested content. No preamble. "
             "These are design SUGGESTIONS based on the user's chosen style and colors.",
-            provider="anthropic",
-            max_retries=0,
         )
     except Exception:
         raw = ""

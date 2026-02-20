@@ -181,6 +181,7 @@ class TestCmdPassEvidence:
 # Extend shim with stubs needed by forja_outcome imports
 _shim.load_dotenv = lambda *a, **kw: {}
 _shim.call_llm = lambda *a, **kw: ""
+_shim._call_claude_code = lambda *a, **kw: ""
 _shim.parse_json = lambda *a, **kw: None
 
 from forja.templates.forja_outcome import _deterministic_eval

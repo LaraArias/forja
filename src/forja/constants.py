@@ -26,6 +26,34 @@ PROJECT_MARKERS = [CLAUDE_MD, FORJA_TOOLS]
 # ── Build prompt (the instruction sent to Claude Code) ──────────
 BUILD_PROMPT = "Read CLAUDE.md and execute Forja with the PRD in context/prd.md"
 
+# ── Decomposition prompt (Phase 2a — plan only, no build) ──────
+DECOMPOSE_PROMPT = (
+    "Read CLAUDE.md and execute ONLY Steps 0-7 (preflight, read PRD, "
+    "decompose into epics, generate teammate artifacts, QA teammate, "
+    "teammate_map.json, post-plan validation). Do NOT execute Step 8 "
+    "(Create Agent Team) — stop after generating all artifacts. "
+    "The PRD is at context/prd.md."
+)
+
+# ── Feature prompt (Phase 2b — one per teammate, fresh context) ──
+FEATURE_PROMPT = (
+    "Read context/teammates/{name}/CLAUDE.md and implement all features. "
+    "Commit after each task with structured metadata. "
+    "When done, ensure all features in "
+    "context/teammates/{name}/features.json have status 'passed'."
+)
+
+# ── Enrichment prompt (sent to Claude Code for PRD enrichment) ──
+ENRICHMENT_PROMPT = (
+    "Read .forja/enrichment-instructions.md for the full enrichment plan. "
+    "Then read each spec file listed there. Apply all decisions and feedback "
+    "to enrich the specs IN PLACE. Also read context/learnings/_learnings.md "
+    "and .forja/outcome-report.json for additional context. "
+    "If the project uses a specific tech stack, you may search the web "
+    "for best practices relevant to the failed features. "
+    "Do NOT create new files. Only edit existing spec files."
+)
+
 # ── Forja feature glossary (used to enrich user feedback in iterate) ──
 FORJA_FEATURES_GLOSSARY = {
     "observatory": {

@@ -404,10 +404,18 @@ def run_init(directory: str = ".", force: bool = False, upgrade: bool = False) -
     auto_register(target)
 
     # Step 10: Auto-launch planning
+    # Change to target directory so relative paths (PRD_PATH, CONTEXT_DIR, etc.)
+    # in planner.py resolve to the correct project, not the CWD where forja was invoked.
     from forja.planner import run_plan  # local import to avoid circular dep
 
     print(f"\n{BOLD}── Starting Plan Mode ──{RESET}\n")
-    plan_ok = run_plan(prd_path=str(target / PRD_PATH), _called_from_runner=False)
+    original_cwd = os.getcwd()
+    os.chdir(target)
+    try:
+        plan_ok = run_plan(prd_path=str(target / PRD_PATH), _called_from_runner=False)
+    finally:
+        os.chdir(original_cwd)
+
     if plan_ok:
         print(f"\n{PASS_ICON} Project initialized and PRD ready.")
         print(f"  Run {BOLD}forja run{RESET} to start the build.\n")

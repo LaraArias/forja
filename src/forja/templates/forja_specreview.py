@@ -16,8 +16,10 @@ import os
 import sys
 from pathlib import Path
 
+import shutil
+
 from forja_utils import (
-    load_dotenv, call_llm, parse_json,
+    load_dotenv, _call_claude_code, parse_json,
     PASS_ICON, FAIL_ICON, WARN_ICON, RED, YELLOW, DIM, BOLD, RESET,
 )
 
@@ -292,17 +294,18 @@ def cmd_specreview(prd_path, output_format="text"):
     if learnings:
         print(f"  Learnings: {len(learnings)} entries")
 
-    # 3. Check API key
+    # 3. Check API key or Claude CLI
     load_dotenv()
     has_key = any(os.environ.get(k) for k in ("KIMI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"))
-    if not has_key:
-        print(f"{WARN_ICON} Spec review skipped: no LLM API key configured")
+    has_claude = shutil.which("claude") is not None
+    if not has_key and not has_claude:
+        print(f"{WARN_ICON} Spec review skipped: no LLM API key or Claude CLI")
         sys.exit(0)
 
     # 4. Call LLM
     print(f"  Calling LLM for independent review...")
     prompt, system_msg = _build_prompt(prd_content, context_items, learnings)
-    raw_content = call_llm(prompt, system=system_msg)
+    raw_content = _call_claude_code(prompt, system=system_msg)
 
     if not raw_content:
         print(f"{WARN_ICON} Spec review skipped: LLM did not respond")

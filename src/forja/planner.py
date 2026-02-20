@@ -32,8 +32,7 @@ from forja.utils import (
     RED,
     YELLOW,
     RESET,
-    _call_anthropic_raw,
-    call_llm,
+    _call_claude_code,
     gather_context,
     load_dotenv,
     parse_json,
@@ -70,6 +69,27 @@ FALLBACK_QUESTIONS = [
     {"id": 6, "expert_name": "Security Engineer", "question": "What are the input size limits?", "why": "Without limits, someone uploads 1GB in a text field.", "default": "Title: max 255 chars. Content: max 50KB. Body: max 100KB."},
     {"id": 7, "expert_name": "Software Architect", "question": "Can all dependencies be installed via pip/npm without system packages?", "why": "Claude Code builds autonomously and cannot run apt-get or brew.", "default": "All deps via pip. SQLite (built-in), no Docker, no external services."},
     {"id": 8, "expert_name": "Product Strategist", "question": "What is the expected response format?", "why": "Without a clear API contract, the frontend breaks with every change.", "default": "JSON with snake_case fields. Timestamps ISO-8601 UTC. IDs as UUID4 string."},
+]
+
+DESIGN_QUESTIONS = [
+    {
+        "expert_name": "Design Systems Expert",
+        "question": "What is the visual hierarchy and layout structure?",
+        "why": "Without clear hierarchy, users don't know where to look or what to do first.",
+        "default": "Single-column mobile, 2-column desktop. Clear H1→H2→body hierarchy. Primary CTA above fold.",
+    },
+    {
+        "expert_name": "Design Systems Expert",
+        "question": "What accessibility standards must this meet?",
+        "why": "WCAG AA compliance prevents legal issues and ensures usability for all users.",
+        "default": "WCAG AA: 4.5:1 contrast, keyboard navigable, semantic HTML, alt text for images.",
+    },
+    {
+        "expert_name": "Design Systems Expert",
+        "question": "What is the responsive breakpoint strategy?",
+        "why": "Without breakpoints defined upfront, the layout breaks on mobile or tablet.",
+        "default": "Mobile-first. Breakpoints: 640px (sm), 768px (md), 1024px (lg). Fluid between.",
+    },
 ]
 
 TECHNICAL_QUESTIONS = [
@@ -172,7 +192,7 @@ def _detect_skill() -> str:
                     return "landing-page"
                 if "database" in agent_names or "security" in agent_names:
                     return "api-backend"
-            except Exception as exc:
+            except (json.JSONDecodeError, OSError, KeyError) as exc:
                 logger.debug("Failed to read skill file %s: %s", path, exc)
     return "custom"
 
@@ -190,13 +210,9 @@ def _call_claude_research(expert_name, expert_field, topic, prd_summary):
         f"Be concise, max 3 paragraphs."
     )
     try:
-        return _call_anthropic_raw(
-            user_content,
-            system="",
-            model=load_config().models.anthropic_model,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        )
-    except Exception:
+        result = _call_claude_code(user_content, timeout=60)
+        return result if result else None
+    except (OSError, TimeoutError, RuntimeError):
         return None
 
 
@@ -471,8 +487,8 @@ def _generate_prd_from_idea(user_idea, skill="custom", context=""):
     system_msg = "\n\n".join(system_parts)
 
     try:
-        raw = call_llm(prompt, system=system_msg, provider="anthropic")
-    except Exception:
+        raw = _call_claude_code(prompt, system=system_msg)
+    except (OSError, TimeoutError, RuntimeError):
         raw = ""
     if not raw:
         return None, None
@@ -594,7 +610,11 @@ def _generate_prd_from_idea(user_idea, skill="custom", context=""):
     return md.strip(), title
 
 
-def _scratch_flow(existing_context: dict[str, str] | None = None, skill: str = "custom"):
+def _scratch_flow(
+    existing_context: dict[str, str] | None = None,
+    skill: str = "custom",
+    prd_file: Path | None = None,
+):
     """Interactive flow to create a PRD from scratch (or from existing context).
 
     When *existing_context* is provided (structured dict from
@@ -605,9 +625,11 @@ def _scratch_flow(existing_context: dict[str, str] | None = None, skill: str = "
     *skill* is forwarded to ``_generate_prd_from_idea`` so the LLM prompt
     includes project-type constraints (e.g. "Landing Page = HTML only").
 
+    *prd_file* overrides the default ``PRD_PATH`` for writing the PRD.
+
     Returns (prd_content, should_continue_to_expert_panel) or (None, False) on abort.
     """
-    prd_file = PRD_PATH
+    prd_file = prd_file or PRD_PATH
 
     print()
     print(f"{BOLD}  ── Forja Plan Mode ──{RESET}")
@@ -880,8 +902,13 @@ def _ensure_technical_expert(
     return experts, questions
 
 
-def _ensure_design_expert(experts: list, prd_text: str) -> list:
-    """Add a design expert when the PRD describes a UI project."""
+def _ensure_design_expert(
+    experts: list, questions: list, prd_text: str,
+) -> tuple[list, list]:
+    """Add a design expert and questions when the PRD describes a UI project.
+
+    Returns ``(experts, questions)`` — mirrors :func:`_ensure_technical_expert`.
+    """
     ui_keywords = [
         "frontend", "ui", "web", "landing", "dashboard", "game", "mobile",
         "react", "html", "css", "canvas", "drag", "drop", "theme", "responsive",
@@ -897,7 +924,27 @@ def _ensure_design_expert(experts: list, prd_text: str) -> list:
             "field": "UX Design & Visual Systems",
             "perspective": "Accessible, consistent, performant interfaces",
         })
-    return experts
+        next_id = max((q.get("id", 0) for q in questions), default=0) + 1
+        for i, dq in enumerate(DESIGN_QUESTIONS):
+            questions.append({**dq, "id": next_id + i})
+    return experts, questions
+
+
+def _deduplicate_experts(experts: list[dict]) -> list[dict]:
+    """Remove experts with duplicate names or fields, keeping first occurrence."""
+    seen_names: set[str] = set()
+    seen_fields: set[str] = set()
+    unique: list[dict] = []
+    for e in experts:
+        name = e.get("name", "").lower()
+        field = e.get("field", "").lower()
+        if name in seen_names or (field and field in seen_fields):
+            continue
+        seen_names.add(name)
+        if field:
+            seen_fields.add(field)
+        unique.append(e)
+    return unique
 
 
 # ── Core flow ───────────────────────────────────────────────────────
@@ -943,11 +990,12 @@ def _ask_question(q, experts, prd_summary, research_log=None, total=8, auto_mode
     print(f"  {color}{BOLD}[{expert} — {qid}/{total}]{RESET} {question}")
     print(f"  {DIM}Why it matters: \"{why}\"{RESET}")
     print(f"  {DIM}Suggestion: {default}{RESET}")
+    print(f"  {DIM}Enter=accept | skip | research [topic] | done{RESET}")
     print()
 
     if auto_mode:
         print(f"  {GREEN}✔ Auto-accepted{RESET}")
-        return default, "DECISION"
+        return default, "ACCEPTED"
 
     while True:
         _flush_stdin()
@@ -955,16 +1003,16 @@ def _ask_question(q, experts, prd_summary, research_log=None, total=8, auto_mode
             answer = input(f"  {BOLD}>{RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return default, "ASSUMPTION"
+            return default, "SKIPPED"
 
         if not answer:
             # Enter = accept suggestion
             print(f"  {GREEN}✔ Accepted{RESET}")
-            return default, "DECISION"
+            return default, "ACCEPTED"
 
         if answer.lower() == "skip":
             print(f"  {DIM}→ Using default{RESET}")
-            return default, "ASSUMPTION"
+            return default, "SKIPPED"
 
         if answer.lower() == "done":
             return None, "DONE"
@@ -1019,15 +1067,14 @@ def _do_research(expert_name, topic, prd_summary, experts=None):
         # Fallback: any provider without web search
         print(f"  {YELLOW}Web search unavailable, using expert knowledge only{RESET}")
         try:
-            raw = call_llm(
+            raw = _call_claude_code(
                 f"The project context: {prd_summary}\n\n"
                 f"Research topic: {topic}\n\n"
                 f"Respond as {expert_name} would: with specific data, benchmarks, "
                 f"and a concrete recommendation. Keep it under 200 words.",
                 system=f"You are {expert_name}, a domain expert. Answer concisely with concrete data and a clear recommendation.",
-                provider="anthropic",
             )
-        except Exception:
+        except (OSError, TimeoutError, RuntimeError):
             raw = ""
         if raw:
             findings = raw.strip()
@@ -1151,7 +1198,7 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
         sections_text = (
             f"1. Keep the original PRD intact at the beginning\n"
             f"2. Add section '## Page Content Decisions' with copy/messaging answers, "
-            f"marked [FACT], [DECISION], or [ASSUMPTION]\n"
+            f"marked [FACT], [ACCEPTED], or [SKIPPED]\n"
             f"3. Add section '## Audience & Conversion Strategy' with product answers\n"
             f"4. Add section '## Accessibility & Performance' with any accessibility/perf answers\n"
             f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
@@ -1161,7 +1208,7 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
         sections_text = (
             f"1. Keep the original PRD intact at the beginning\n"
             f"2. Add section '## Technical Decisions' with architecture answers, "
-            f"marked [FACT], [DECISION], or [ASSUMPTION]\n"
+            f"marked [FACT], [ACCEPTED], or [SKIPPED]\n"
             f"3. Add section '## Product Strategy' with product answers\n"
             f"4. Add section '## Security and Edge Cases' with security answers\n"
             f"5. Add section '## Assumption Density: X/{len(qa_transcript)}' "
@@ -1178,7 +1225,8 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
     research_section = ""
     if research_log:
         research_text = "\n".join(
-            f"- **{r['topic']}**: {r['findings'][:300]}" for r in research_log
+            f"- **{r['topic']}**: {r['findings'][:1500]}{'...' if len(r['findings']) > 1500 else ''}"
+            for r in research_log
         )
         next_num = 7 if design_context else 6
         research_section = (
@@ -1200,7 +1248,7 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
         system_msg = skill_constraint + "\n\n" + system_msg
 
     try:
-        raw = call_llm(
+        raw = _call_claude_code(
             f"The experts ({experts_text}) have received the user's answers. "
             f"Generate the enriched PRD.\n\n"
             f"Experts and their questions/answers:\n{transcript_text}\n"
@@ -1213,9 +1261,9 @@ def _generate_enriched_prd(prd_content, qa_transcript, experts, design_context="
             f"the expert Q&A. Do NOT invent commands, URLs, metrics, or claims.\n\n"
             f"Respond ONLY with the complete PRD in markdown.",
             system=system_msg,
-            provider="anthropic",
+            timeout=180,
         )
-    except Exception:
+    except (OSError, TimeoutError, RuntimeError):
         raw = ""
     if raw:
         # Strip markdown wrappers if present
@@ -1238,16 +1286,15 @@ def _modify_prd_section(prd_text: str, feedback: str) -> str:
         f"Return the full updated PRD."
     )
     try:
-        result = call_llm(
+        result = _call_claude_code(
             prompt,
             system=(
                 "You are a PRD editor. Make minimal targeted changes based on the "
                 "user's feedback. Do not rewrite sections that don't need changes. "
                 "Return ONLY the PRD in markdown, no preamble."
             ),
-            provider="anthropic",
         )
-    except Exception:
+    except (OSError, TimeoutError, RuntimeError):
         result = ""
     if result:
         text = result.strip()
@@ -1269,16 +1316,15 @@ def _regenerate_prd_with_feedback(prd_text: str, feedback: str) -> str:
         f"structure but improve based on the feedback."
     )
     try:
-        result = call_llm(
+        result = _call_claude_code(
             prompt,
             system=(
                 "You are a PRD writer. Regenerate the PRD incorporating the "
                 "user's feedback while maintaining professional structure. "
                 "Return ONLY the PRD in markdown, no preamble."
             ),
-            provider="anthropic",
         )
-    except Exception:
+    except (OSError, TimeoutError, RuntimeError):
         result = ""
     if result:
         text = result.strip()
@@ -1293,12 +1339,15 @@ def _regenerate_prd_with_feedback(prd_text: str, feedback: str) -> str:
 
 def _interactive_prd_edit(prd_text: str) -> str:
     """Let user review and edit the enriched PRD interactively."""
+    previous_version: str | None = None
     while True:
         print(f"\n  {BOLD}Options:{RESET}")
         print(f"    {GREEN}(1){RESET} Accept and save")
         print(f"    {YELLOW}(2){RESET} Edit a section (tell me what to change)")
         print(f"    {CYAN}(3){RESET} Regenerate with feedback")
         print(f"    {DIM}(4){RESET} View full PRD")
+        if previous_version is not None:
+            print(f"    {RED}(5){RESET} Undo last edit")
         print()
 
         _flush_stdin()
@@ -1319,6 +1368,7 @@ def _interactive_prd_edit(prd_text: str) -> str:
                 continue
             if feedback:
                 print(f"\n  {DIM}Updating PRD...{RESET}")
+                previous_version = prd_text
                 prd_text = _modify_prd_section(prd_text, feedback)
                 print(f"\n  {BOLD}── Updated PRD (preview) ──{RESET}")
                 preview = prd_text[:500]
@@ -1337,6 +1387,7 @@ def _interactive_prd_edit(prd_text: str) -> str:
                 continue
             if feedback:
                 print(f"\n  {DIM}Regenerating PRD...{RESET}")
+                previous_version = prd_text
                 prd_text = _regenerate_prd_with_feedback(prd_text, feedback)
                 print(f"\n  {BOLD}── Regenerated PRD (preview) ──{RESET}")
                 preview = prd_text[:500]
@@ -1348,6 +1399,10 @@ def _interactive_prd_edit(prd_text: str) -> str:
             print()
             for line in prd_text.splitlines():
                 print(f"  {line}")
+        elif choice == "5" and previous_version is not None:
+            prd_text = previous_version
+            previous_version = None
+            print(f"  {GREEN}✔ Reverted to previous version{RESET}")
 
 
 def _save_transcript(round_data, enriched_prd, research_log=None):
@@ -1361,10 +1416,16 @@ def _save_transcript(round_data, enriched_prd, research_log=None):
         "rounds": round_data,
         "research": research_log or [],
         "enriched_prd_length": len(enriched_prd) if enriched_prd else 0,
+        "enriched_prd": enriched_prd or "",
     }
 
     out_path = FORJA_DIR / "plan-transcript.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Archive previous transcript if it exists
+    if out_path.exists():
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        archive_path = FORJA_DIR / f"plan-transcript-{ts}.json"
+        out_path.rename(archive_path)
     out_path.write_text(
         json.dumps(transcript, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -1373,6 +1434,30 @@ def _save_transcript(round_data, enriched_prd, research_log=None):
 
 
 # ── Expert Q&A helper ────────────────────────────────────────────────
+
+
+def _ask_panel_scope(round_label: str, question_count: int) -> str:
+    """Ask user how they want to handle the expert round.
+
+    Returns ``'full'``, ``'quick'`` (accept all defaults), or ``'skip'``.
+    """
+    print(f"\n  {BOLD}{round_label} round: {question_count} expert questions{RESET}")
+    print(f"    {GREEN}(1){RESET} Full review — answer each question")
+    print(f"    {YELLOW}(2){RESET} Quick review — accept all defaults")
+    print(f"    {DIM}(3){RESET} Skip this round")
+    print()
+    _flush_stdin()
+    try:
+        choice = input(f"  {BOLD}>{RESET} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "full"
+    if choice == "2":
+        return "quick"
+    if choice == "3":
+        return "skip"
+    return "full"
+
 
 def _run_expert_qa(
     prompt_template: str,
@@ -1399,15 +1484,14 @@ def _run_expert_qa(
     print(f"\n  {DIM}Assembling {round_label} expert panel...{RESET}")
 
     try:
-        raw = call_llm(
+        raw = _call_claude_code(
             f"{prompt_template}\n\n"
             f"IMPORTANT CONTEXT:\n{skill_guidance}\n\n"
             f"PRD:\n{prd_content}\n\n"
             f"Available context:\n{context}",
             system="You are a conductor of expertise. Respond only with valid JSON.",
-            provider="anthropic",
         )
-    except Exception:
+    except (OSError, TimeoutError, RuntimeError):
         raw = ""
     panel = None
     if raw:
@@ -1426,14 +1510,14 @@ def _run_expert_qa(
         questions = list(fallback_questions)
         assessment = "PRD needs clarification before building."
     else:
-        experts = panel["experts"][:3]
+        experts = _deduplicate_experts(panel["experts"])[:3]
         questions = panel["questions"][:max_questions]
         assessment = panel.get("initial_assessment", "")
 
     if ensure_tech:
         experts, questions = _ensure_technical_expert(experts, questions)
     if ensure_design:
-        experts = _ensure_design_expert(experts, prd_content)
+        experts, questions = _ensure_design_expert(experts, questions, prd_content)
 
     # Ensure each question has an id
     for i, q in enumerate(questions):
@@ -1448,8 +1532,6 @@ def _run_expert_qa(
     research_log: list[dict] = []
     if auto_mode:
         print(f"  {DIM}Auto mode: accepting all expert defaults{RESET}")
-    else:
-        print(f"  {DIM}Enter=accept default | skip | research [topic] to investigate | done to finish{RESET}")
     print()
 
     for q in questions:
@@ -1460,7 +1542,7 @@ def _run_expert_qa(
                 "expert": q["expert_name"],
                 "question": q["question"],
                 "answer": q["default"],
-                "tag": "ASSUMPTION",
+                "tag": "SKIPPED",
             })
             remaining_qs = questions[questions.index(q) + 1:]
             for rq in remaining_qs:
@@ -1468,7 +1550,7 @@ def _run_expert_qa(
                     "expert": rq["expert_name"],
                     "question": rq["question"],
                     "answer": rq["default"],
-                    "tag": "ASSUMPTION",
+                    "tag": "SKIPPED",
                 })
             print(f"\n  {DIM}Using defaults for {len(remaining_qs) + 1} remaining questions{RESET}")
             break
@@ -1483,12 +1565,12 @@ def _run_expert_qa(
 
     # Summary
     facts = sum(1 for a in qa_transcript if a["tag"] == "FACT")
-    decisions = sum(1 for a in qa_transcript if a["tag"] == "DECISION")
-    assumptions = sum(1 for a in qa_transcript if a["tag"] == "ASSUMPTION")
+    accepted = sum(1 for a in qa_transcript if a["tag"] == "ACCEPTED")
+    skipped = sum(1 for a in qa_transcript if a["tag"] == "SKIPPED")
     print()
     print(f"  {BOLD}{round_label} Summary:{RESET} {GREEN}{facts} facts{RESET}, "
-          f"{CYAN}{decisions} decisions{RESET}, "
-          f"{YELLOW}{assumptions} assumptions{RESET}")
+          f"{CYAN}{accepted} accepted{RESET}, "
+          f"{YELLOW}{skipped} skipped{RESET}")
 
     return experts, questions, qa_transcript, research_log, assessment
 
@@ -1525,6 +1607,44 @@ def _get_skill_how_guidance(skill: str) -> str:
             "deployment (uvicorn). All deps must be pip-installable."
         )
     return ""
+
+
+# Keyword-based guidance for the "custom" skill
+_CUSTOM_SKILL_HINTS = {
+    "game": "Focus on game mechanics, player experience, difficulty balance, and input handling.",
+    "cli": "Focus on command structure, argument parsing, output formatting, and error messages.",
+    "dashboard": "Focus on data visualization, layout, filtering, and real-time updates.",
+    "bot": "Focus on conversation flow, intent detection, response templates, and fallbacks.",
+    "pipeline": "Focus on data flow, error handling, retry logic, and observability.",
+    "scraper": "Focus on rate limiting, data extraction patterns, storage, and error recovery.",
+    "extension": "Focus on browser APIs, permissions, content scripts, and popup UI.",
+}
+
+
+def _infer_custom_guidance(prd_content: str) -> str:
+    """Infer guidance for ``custom`` skill based on PRD keywords."""
+    text = prd_content.lower()
+    hints: list[str] = []
+    for keyword, guidance in _CUSTOM_SKILL_HINTS.items():
+        if keyword in text:
+            hints.append(guidance)
+    if not hints:
+        return ""
+    return "Based on the project description:\n" + "\n".join(f"- {h}" for h in hints)
+
+
+def _check_missing_context() -> None:
+    """Warn if project context is missing (user ran ``forja plan`` without ``forja init``)."""
+    missing: list[str] = []
+    if not (CONTEXT_DIR / "company").is_dir():
+        missing.append("company context")
+    domains_dir = CONTEXT_DIR / "domains"
+    if not domains_dir.is_dir() or not any(domains_dir.iterdir()):
+        missing.append("domain/audience context")
+    if missing:
+        print(f"  {YELLOW}Note: Missing {', '.join(missing)}.{RESET}")
+        print(f"  {DIM}Run 'forja init .' to set up full context for better results.{RESET}")
+        print()
 
 
 # ── Main entry point ────────────────────────────────────────────────
@@ -1576,7 +1696,9 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False, auto_mode: boo
             print(f"  {RED}Auto mode requires existing PRD or context. Write a PRD first.{RESET}")
             return False
         else:
-            prd_content, continue_to_panel = _scratch_flow(existing_context, skill=skill)
+            prd_content, continue_to_panel = _scratch_flow(
+                existing_context, skill=skill, prd_file=prd_file,
+            )
             if not prd_content:
                 return False
             if not continue_to_panel:
@@ -1592,10 +1714,18 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False, auto_mode: boo
     # Load env
     load_dotenv()
 
+    # Warn if context is missing (only when invoked directly, not from runner)
+    if not _called_from_runner:
+        _check_missing_context()
+
     # Gather context
     context = _gather_context()
 
     base_guidance = SKILL_EXPERT_GUIDANCE.get(skill, SKILL_EXPERT_GUIDANCE["custom"])
+    if skill == "custom":
+        inferred = _infer_custom_guidance(prd_content)
+        if inferred:
+            base_guidance += "\n" + inferred
 
     round_data: list[dict] = []
     all_research: list[dict] = []
@@ -1607,20 +1737,41 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False, auto_mode: boo
 
     what_guidance = base_guidance + "\n" + _get_skill_what_guidance(skill)
 
-    what_experts, what_qs, what_transcript, what_research, _ = _run_expert_qa(
-        prompt_template=WHAT_PANEL_PROMPT,
-        fallback_experts=FALLBACK_WHAT_EXPERTS,
-        fallback_questions=FALLBACK_WHAT_QUESTIONS,
-        prd_content=prd_content,
-        prd_title=prd_title,
-        context=context,
-        skill_guidance=what_guidance,
-        round_label="WHAT",
-        max_questions=6,
-        ensure_tech=False,
-        ensure_design=True,
-        auto_mode=auto_mode,
-    )
+    # Let user choose round scope (full / quick / skip)
+    what_round_auto = auto_mode
+    what_skip = False
+    if not auto_mode:
+        scope = _ask_panel_scope("WHAT", 6)
+        if scope == "quick":
+            what_round_auto = True
+        elif scope == "skip":
+            what_skip = True
+
+    if what_skip:
+        what_experts = list(FALLBACK_WHAT_EXPERTS)
+        what_qs = list(FALLBACK_WHAT_QUESTIONS)
+        what_transcript = [
+            {"expert": q.get("expert_name", ""), "question": q["question"],
+             "answer": q["default"], "tag": "SKIPPED"}
+            for q in what_qs
+        ]
+        what_research: list[dict] = []
+        print(f"  {DIM}Skipped — using defaults{RESET}")
+    else:
+        what_experts, what_qs, what_transcript, what_research, _ = _run_expert_qa(
+            prompt_template=WHAT_PANEL_PROMPT,
+            fallback_experts=FALLBACK_WHAT_EXPERTS,
+            fallback_questions=FALLBACK_WHAT_QUESTIONS,
+            prd_content=prd_content,
+            prd_title=prd_title,
+            context=context,
+            skill_guidance=what_guidance,
+            round_label="WHAT",
+            max_questions=6,
+            ensure_tech=False,
+            ensure_design=True,
+            auto_mode=what_round_auto,
+        )
 
     round_data.append({
         "round": "WHAT",
@@ -1667,20 +1818,41 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False, auto_mode: boo
 
     how_guidance = base_guidance + "\n" + _get_skill_how_guidance(skill)
 
-    how_experts, how_qs, how_transcript, how_research, _ = _run_expert_qa(
-        prompt_template=HOW_PANEL_PROMPT,
-        fallback_experts=FALLBACK_HOW_EXPERTS,
-        fallback_questions=FALLBACK_HOW_QUESTIONS,
-        prd_content=what_enriched,
-        prd_title=prd_title,
-        context=context,
-        skill_guidance=how_guidance,
-        round_label="HOW",
-        max_questions=7,
-        ensure_tech=True,
-        ensure_design=False,
-        auto_mode=auto_mode,
-    )
+    # Let user choose round scope (full / quick / skip)
+    how_round_auto = auto_mode
+    how_skip = False
+    if not auto_mode:
+        scope = _ask_panel_scope("HOW", 7)
+        if scope == "quick":
+            how_round_auto = True
+        elif scope == "skip":
+            how_skip = True
+
+    if how_skip:
+        how_experts = list(FALLBACK_HOW_EXPERTS)
+        how_qs = list(FALLBACK_HOW_QUESTIONS)
+        how_transcript = [
+            {"expert": q.get("expert_name", ""), "question": q["question"],
+             "answer": q["default"], "tag": "SKIPPED"}
+            for q in how_qs
+        ]
+        how_research: list[dict] = []
+        print(f"  {DIM}Skipped — using defaults{RESET}")
+    else:
+        how_experts, how_qs, how_transcript, how_research, _ = _run_expert_qa(
+            prompt_template=HOW_PANEL_PROMPT,
+            fallback_experts=FALLBACK_HOW_EXPERTS,
+            fallback_questions=FALLBACK_HOW_QUESTIONS,
+            prd_content=what_enriched,
+            prd_title=prd_title,
+            context=context,
+            skill_guidance=how_guidance,
+            round_label="HOW",
+            max_questions=7,
+            ensure_tech=True,
+            ensure_design=False,
+            auto_mode=how_round_auto,
+        )
 
     round_data.append({
         "round": "HOW",
@@ -1690,8 +1862,14 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False, auto_mode: boo
     })
     all_research.extend(how_research)
 
-    # ── Design Context (optional) ──
-    design_context = _collect_design_context()
+    # ── Design Context (optional — skip if brand-assets from init exist) ──
+    brand_dir = CONTEXT_DIR / "company" / "brand-assets"
+    has_brand = (brand_dir / "colors.json").exists()
+    if has_brand:
+        print(f"\n  {DIM}Using design choices from init (brand-assets/){RESET}")
+        design_context = _read_design_choices()
+    else:
+        design_context = _collect_design_context()
 
     # ── Generate final enriched PRD with both rounds ──
     all_transcript = what_transcript + how_transcript
@@ -1712,7 +1890,7 @@ def run_plan(prd_path=None, *, _called_from_runner: bool = False, auto_mode: boo
 
     if not enriched_prd:
         # Fallback: manual assembly
-        assumptions = sum(1 for a in all_transcript if a["tag"] == "ASSUMPTION")
+        assumptions = sum(1 for a in all_transcript if a["tag"] == "SKIPPED")
         print(f"  {YELLOW}LLM did not respond. Generating PRD manually.{RESET}")
         enriched_prd = what_enriched + "\n"
         tech_heading = (

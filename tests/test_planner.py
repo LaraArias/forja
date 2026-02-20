@@ -10,11 +10,11 @@ from pathlib import Path
 class TestPlannerSharedUtilities:
     """Verify planner uses shared utilities at runtime."""
 
-    def test_planner_has_call_llm(self):
-        """Planner should use the shared call_llm client."""
+    def test_planner_has_call_claude_code(self):
+        """Planner should use the shared _call_claude_code client."""
         import forja.planner as planner
-        assert hasattr(planner, "call_llm")
-        assert callable(planner.call_llm)
+        assert hasattr(planner, "_call_claude_code")
+        assert callable(planner._call_claude_code)
 
     def test_planner_has_parse_json(self):
         """Planner should use shared JSON parsing."""
@@ -133,13 +133,14 @@ class TestDesignExpert:
             {"name": "Security Engineer", "field": "Security"},
             {"name": "PM", "field": "Product Strategy"},
         ]
+        questions = [{"id": 1, "expert_name": "PM", "question": "q?", "default": "d"}]
         prd = "Build a React dashboard for real-time analytics."
-        result = _ensure_design_expert(experts, prd)
+        result_experts, result_questions = _ensure_design_expert(experts, questions, prd)
         assert any(
             "design" in e.get("field", "").lower() or "ux" in e.get("field", "").lower()
-            for e in result
+            for e in result_experts
         ), "Design expert should be present for UI project"
-        assert result[1]["name"] == "Design Systems Expert"
+        assert result_experts[1]["name"] == "Design Systems Expert"
 
     def test_design_expert_not_added_for_cli(self):
         """PRD for a CLI tool should NOT get a design expert."""
@@ -149,12 +150,13 @@ class TestDesignExpert:
             {"name": "Security Engineer", "field": "Security"},
             {"name": "PM", "field": "Product Strategy"},
         ]
+        questions = []
         prd = "Build a CLI tool for parsing log files and generating reports."
-        result = _ensure_design_expert(experts, prd)
+        result_experts, result_questions = _ensure_design_expert(experts, questions, prd)
         assert not any(
-            e.get("name") == "Design Systems Expert" for e in result
+            e.get("name") == "Design Systems Expert" for e in result_experts
         ), "No design expert should be added for CLI project"
-        assert len(result) == 3
+        assert len(result_experts) == 3
 
 
 class TestInteractivePrdEdit:
@@ -222,21 +224,21 @@ class TestModifyPrdSection:
 
     def test_returns_llm_response(self):
         from forja.planner import _modify_prd_section
-        with patch("forja.planner.call_llm",
+        with patch("forja.planner._call_claude_code",
                    return_value="# Updated PRD\n## New Section"):
             result = _modify_prd_section("# Original", "Add new section")
         assert result == "# Updated PRD\n## New Section"
 
     def test_strips_markdown_fences(self):
         from forja.planner import _modify_prd_section
-        with patch("forja.planner.call_llm",
+        with patch("forja.planner._call_claude_code",
                    return_value="```markdown\n# PRD\nContent\n```"):
             result = _modify_prd_section("# Old", "fix it")
         assert result == "# PRD\nContent"
 
     def test_returns_original_on_llm_failure(self):
         from forja.planner import _modify_prd_section
-        with patch("forja.planner.call_llm", return_value=None):
+        with patch("forja.planner._call_claude_code", return_value=None):
             result = _modify_prd_section("# Original PRD", "change something")
         assert result == "# Original PRD"
 
@@ -246,21 +248,21 @@ class TestRegeneratePrdWithFeedback:
 
     def test_returns_llm_response(self):
         from forja.planner import _regenerate_prd_with_feedback
-        with patch("forja.planner.call_llm",
+        with patch("forja.planner._call_claude_code",
                    return_value="# Regenerated PRD"):
             result = _regenerate_prd_with_feedback("# Old", "make it better")
         assert result == "# Regenerated PRD"
 
     def test_strips_markdown_fences(self):
         from forja.planner import _regenerate_prd_with_feedback
-        with patch("forja.planner.call_llm",
+        with patch("forja.planner._call_claude_code",
                    return_value="```\n# PRD v2\nNew content\n```"):
             result = _regenerate_prd_with_feedback("# Old", "redo")
         assert result == "# PRD v2\nNew content"
 
     def test_returns_original_on_llm_failure(self):
         from forja.planner import _regenerate_prd_with_feedback
-        with patch("forja.planner.call_llm", return_value=None):
+        with patch("forja.planner._call_claude_code", return_value=None):
             result = _regenerate_prd_with_feedback("# Keep this", "change")
         assert result == "# Keep this"
 
@@ -295,7 +297,7 @@ class TestDoResearch:
         monkeypatch.setattr("forja.planner.FORJA_DIR", tmp_path / ".forja")
 
         with patch("forja.planner._call_claude_research", return_value=None), \
-             patch("forja.planner.call_llm", return_value="Use SQLite for MVP."):
+             patch("forja.planner._call_claude_code", return_value="Use SQLite for MVP."):
             result = _do_research("Engineer", "database choice", "project ctx")
         assert result == "Use SQLite for MVP."
 
@@ -307,7 +309,7 @@ class TestDoResearch:
         monkeypatch.setattr("forja.planner.FORJA_DIR", tmp_path / ".forja")
 
         with patch("forja.planner._call_claude_research", return_value=None), \
-             patch("forja.planner.call_llm", return_value=None):
+             patch("forja.planner._call_claude_code", return_value=None):
             result = _do_research("PM", "market size", "project ctx")
         assert result == ""
         research_dir = tmp_path / ".forja" / "research"
@@ -335,7 +337,7 @@ class TestResearchInEnrichedPrd:
         """_generate_enriched_prd passes research to LLM prompt."""
         from forja.planner import _generate_enriched_prd
         research = [{"topic": "caching", "findings": "Use Redis or in-memory dict."}]
-        with patch("forja.planner.call_llm", return_value="# Enriched PRD") as mock:
+        with patch("forja.planner._call_claude_code", return_value="# Enriched PRD") as mock:
             _generate_enriched_prd("# PRD", [], [], "", research)
         prompt = mock.call_args[0][0]
         assert "Research Findings" in prompt
@@ -344,7 +346,7 @@ class TestResearchInEnrichedPrd:
     def test_no_research_section_when_empty(self):
         """No research → no research section in prompt."""
         from forja.planner import _generate_enriched_prd
-        with patch("forja.planner.call_llm", return_value="# PRD") as mock:
+        with patch("forja.planner._call_claude_code", return_value="# PRD") as mock:
             _generate_enriched_prd("# PRD", [], [], "")
         prompt = mock.call_args[0][0]
         assert "Research Findings" not in prompt
@@ -353,7 +355,7 @@ class TestResearchInEnrichedPrd:
         """When LLM fails, fallback manual assembly includes research."""
         from forja.planner import _generate_enriched_prd
         research = [{"topic": "auth patterns", "findings": "JWT is standard."}]
-        with patch("forja.planner.call_llm", return_value=None):
+        with patch("forja.planner._call_claude_code", return_value=None):
             result = _generate_enriched_prd("# PRD", [], [], "", research)
         # Returns None when LLM fails, caller handles fallback
         assert result is None
@@ -500,7 +502,7 @@ class TestSkillPrdConstraints:
     def test_landing_page_constraint_prepended(self):
         """skill='landing-page' prepends constraint to prompt."""
         from forja.planner import _generate_prd_from_idea, SKILL_PRD_CONSTRAINTS
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("A landing page for my SaaS", skill="landing-page")
         prompt_sent = mock_llm.call_args[0][0]
         assert prompt_sent.startswith("CRITICAL CONSTRAINT")
@@ -511,7 +513,7 @@ class TestSkillPrdConstraints:
     def test_api_backend_constraint_prepended(self):
         """skill='api-backend' prepends FastAPI constraint to prompt."""
         from forja.planner import _generate_prd_from_idea, SKILL_PRD_CONSTRAINTS
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("Notes API", skill="api-backend")
         prompt_sent = mock_llm.call_args[0][0]
         assert "CRITICAL CONSTRAINT" in prompt_sent
@@ -521,7 +523,7 @@ class TestSkillPrdConstraints:
     def test_custom_no_constraint(self):
         """skill='custom' does NOT prepend any constraint."""
         from forja.planner import _generate_prd_from_idea, SKILL_PRD_CONSTRAINTS
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("A todo app", skill="custom")
         prompt_sent = mock_llm.call_args[0][0]
         assert not prompt_sent.startswith("CRITICAL CONSTRAINT")
@@ -529,7 +531,7 @@ class TestSkillPrdConstraints:
     def test_default_skill_is_custom(self):
         """No skill parameter defaults to 'custom' (no constraint)."""
         from forja.planner import _generate_prd_from_idea
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("A todo app")
         prompt_sent = mock_llm.call_args[0][0]
         assert "CRITICAL CONSTRAINT" not in prompt_sent
@@ -552,7 +554,7 @@ class TestSkillPrdConstraints:
             "stack": {"language": "HTML", "framework": "CSS + JS"},
             "out_of_scope": ["Backend API", "Database"],
         })
-        with patch("forja.planner.call_llm", return_value=mock_response) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=mock_response) as mock_llm:
             prd, title = _generate_prd_from_idea(
                 "Landing page for Forja", skill="landing-page"
             )
@@ -578,7 +580,7 @@ class TestSkillPrdConstraints:
             "out_of_scope": ["Auth", "Deployment"],
             "success_metric": "User creates and retrieves a note in under 2 seconds",
         })
-        with patch("forja.planner.call_llm", return_value=mock_response):
+        with patch("forja.planner._call_claude_code", return_value=mock_response):
             prd, title = _generate_prd_from_idea("Notes API", skill="api-backend")
         assert title == "Notes API"
         assert "**Create Note**" in prd
@@ -596,7 +598,7 @@ class TestSkillPrdConstraints:
             "## COMPANY OVERVIEW\nForja builds software faster.\n\n"
             "## VALUE PROPOSITIONS\nStop building the wrong thing"
         )
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("Landing page", context=ctx)
         prompt_sent = mock_llm.call_args[0][0]
         assert "BUSINESS CONTEXT" in prompt_sent
@@ -607,7 +609,7 @@ class TestSkillPrdConstraints:
     def test_prd_prompt_no_context_when_empty(self):
         """No context section when context is empty."""
         from forja.planner import _generate_prd_from_idea
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("A todo app", context="")
         prompt_sent = mock_llm.call_args[0][0]
         assert "BUSINESS CONTEXT" not in prompt_sent
@@ -615,7 +617,7 @@ class TestSkillPrdConstraints:
     def test_prd_system_msg_has_skill_constraint(self):
         """System message includes CRITICAL CONSTRAINT for landing-page."""
         from forja.planner import _generate_prd_from_idea
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("A page", skill="landing-page")
         system_sent = mock_llm.call_args[1].get("system", "")
         assert "CRITICAL CONSTRAINT" in system_sent
@@ -625,7 +627,7 @@ class TestSkillPrdConstraints:
     def test_prd_system_msg_no_constraint_for_custom(self):
         """System message has no constraint for custom skill."""
         from forja.planner import _generate_prd_from_idea
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("An app")
         system_sent = mock_llm.call_args[1].get("system", "")
         assert "CRITICAL CONSTRAINT" not in system_sent
@@ -738,7 +740,7 @@ class TestEnrichedPrdSkill:
         from forja.planner import _generate_enriched_prd
         transcript = [{"tag": "FACT", "expert": "Copywriter", "question": "What's the headline?", "answer": "Build Faster"}]
         experts = [{"name": "Copywriter", "field": "Copy"}]
-        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value="# Enriched") as mock_llm:
             _generate_enriched_prd("# PRD", transcript, experts, skill="landing-page")
         prompt_sent = mock_llm.call_args[0][0]
         assert "Page Content Decisions" in prompt_sent
@@ -754,9 +756,9 @@ class TestEnrichedPrdSkill:
     def test_api_backend_sections(self):
         """skill='api-backend' → keeps 'Technical Decisions' and 'Security'."""
         from forja.planner import _generate_enriched_prd
-        transcript = [{"tag": "DECISION", "expert": "Architect", "question": "Stack?", "answer": "FastAPI"}]
+        transcript = [{"tag": "ACCEPTED", "expert": "Architect", "question": "Stack?", "answer": "FastAPI"}]
         experts = [{"name": "Architect", "field": "Backend"}]
-        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value="# Enriched") as mock_llm:
             _generate_enriched_prd("# PRD", transcript, experts, skill="api-backend")
         prompt_sent = mock_llm.call_args[0][0]
         assert "Technical Decisions" in prompt_sent
@@ -769,7 +771,7 @@ class TestEnrichedPrdSkill:
         from forja.planner import _generate_enriched_prd
         transcript = [{"tag": "FACT", "expert": "PM", "question": "Users?", "answer": "Devs"}]
         experts = [{"name": "PM", "field": "Product"}]
-        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value="# Enriched") as mock_llm:
             _generate_enriched_prd("# PRD", transcript, experts, skill="custom")
         system_sent = mock_llm.call_args[1].get("system", "")
         assert "CRITICAL CONSTRAINT" not in system_sent
@@ -779,7 +781,7 @@ class TestEnrichedPrdSkill:
         from forja.planner import _generate_enriched_prd
         transcript = [{"tag": "FACT", "expert": "PM", "question": "Q?", "answer": "A"}]
         experts = [{"name": "PM", "field": "Product"}]
-        with patch("forja.planner.call_llm", return_value="# Enriched") as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value="# Enriched") as mock_llm:
             _generate_enriched_prd("# PRD", transcript, experts)
         prompt_sent = mock_llm.call_args[0][0]
         assert "Technical Decisions" in prompt_sent
@@ -792,7 +794,7 @@ class TestEnrichedPrdSkill:
         research = [{"topic": "caching", "findings": "Use Redis or in-memory dict."}]
         transcript = [{"tag": "FACT", "expert": "Eng", "question": "Q?", "answer": "A"}]
         experts = [{"name": "Eng", "field": "Engineering"}]
-        with patch("forja.planner.call_llm", return_value="# Enriched") as mock:
+        with patch("forja.planner._call_claude_code", return_value="# Enriched") as mock:
             _generate_enriched_prd("# PRD", transcript, experts, research_log=research, skill="landing-page")
         prompt = mock.call_args[0][0]
         assert "Research Findings" in prompt
@@ -809,7 +811,7 @@ class TestRunExpertQa:
             FALLBACK_WHAT_EXPERTS, FALLBACK_WHAT_QUESTIONS,
         )
         # Simulate user pressing Enter (accept default) for all questions
-        with patch("forja.planner.call_llm", return_value=None), \
+        with patch("forja.planner._call_claude_code", return_value=None), \
              patch("builtins.input", return_value=""):
             experts, questions, transcript, research, assessment = _run_expert_qa(
                 prompt_template=WHAT_PANEL_PROMPT,
@@ -825,7 +827,7 @@ class TestRunExpertQa:
         assert len(experts) >= 2
         assert len(transcript) == len(questions)
         # All answers are DECISION (accepted defaults)
-        assert all(a["tag"] == "DECISION" for a in transcript)
+        assert all(a["tag"] == "ACCEPTED" for a in transcript)
 
     def test_done_fills_remaining_with_assumption(self):
         """Typing 'done' fills remaining questions with ASSUMPTION defaults."""
@@ -835,7 +837,7 @@ class TestRunExpertQa:
         )
         # First answer: custom, second: "done"
         inputs = iter(["My custom answer", "done"])
-        with patch("forja.planner.call_llm", return_value=None), \
+        with patch("forja.planner._call_claude_code", return_value=None), \
              patch("builtins.input", side_effect=inputs):
             experts, questions, transcript, research, _ = _run_expert_qa(
                 prompt_template=HOW_PANEL_PROMPT,
@@ -851,7 +853,7 @@ class TestRunExpertQa:
         # First answer is FACT, rest are ASSUMPTION
         assert transcript[0]["tag"] == "FACT"
         assert transcript[0]["answer"] == "My custom answer"
-        assert all(a["tag"] == "ASSUMPTION" for a in transcript[1:])
+        assert all(a["tag"] == "SKIPPED" for a in transcript[1:])
         assert len(transcript) == len(questions)
 
     def test_returns_five_tuple(self):
@@ -860,7 +862,7 @@ class TestRunExpertQa:
             _run_expert_qa, WHAT_PANEL_PROMPT,
             FALLBACK_WHAT_EXPERTS, FALLBACK_WHAT_QUESTIONS,
         )
-        with patch("forja.planner.call_llm", return_value=None), \
+        with patch("forja.planner._call_claude_code", return_value=None), \
              patch("builtins.input", return_value=""):
             result = _run_expert_qa(
                 prompt_template=WHAT_PANEL_PROMPT,
@@ -953,7 +955,7 @@ class TestSaveTranscriptRounds:
             {"round": "WHAT", "experts": [{"name": "PM"}],
              "questions": [], "answers": [{"tag": "FACT", "answer": "yes"}]},
             {"round": "HOW", "experts": [{"name": "Eng"}],
-             "questions": [], "answers": [{"tag": "DECISION", "answer": "FastAPI"}]},
+             "questions": [], "answers": [{"tag": "ACCEPTED", "answer": "FastAPI"}]},
         ]
         path = _save_transcript(round_data, "# Final PRD")
         assert path.exists()
@@ -1134,7 +1136,7 @@ class TestPrdNewSchemaFields:
             "out_of_scope": ["Backend"],
             "success_metric": "Page loads in 2s",
         })
-        with patch("forja.planner.call_llm", return_value=mock_response):
+        with patch("forja.planner._call_claude_code", return_value=mock_response):
             prd, title = _generate_prd_from_idea("Forja landing", context="some context")
         assert "## Value Propositions" in prd
         assert "Ship 10x faster" in prd
@@ -1160,7 +1162,7 @@ class TestPrdNewSchemaFields:
             "out_of_scope": [],
             "success_metric": "Works",
         })
-        with patch("forja.planner.call_llm", return_value=mock_response):
+        with patch("forja.planner._call_claude_code", return_value=mock_response):
             prd, title = _generate_prd_from_idea("Old app")
         assert "## Audience" in prd
         assert "Individual developers" in prd
@@ -1179,7 +1181,7 @@ class TestPrdNewSchemaFields:
             "out_of_scope": ["Everything else"],
             "success_metric": "Runs",
         })
-        with patch("forja.planner.call_llm", return_value=mock_response):
+        with patch("forja.planner._call_claude_code", return_value=mock_response):
             prd, title = _generate_prd_from_idea("Simple app")
         assert prd is not None
         assert title == "Simple App"
@@ -1193,7 +1195,7 @@ class TestContextInjection:
         """When context provided, prompt has BUSINESS CONTEXT delimiters."""
         from forja.planner import _generate_prd_from_idea
         ctx = "## COMPANY OVERVIEW\nAcme builds rockets"
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("Rocket landing page", context=ctx)
         prompt_sent = mock_llm.call_args[0][0]
         assert "--- BUSINESS CONTEXT" in prompt_sent
@@ -1204,7 +1206,7 @@ class TestContextInjection:
     def test_no_delimiters_without_context(self):
         """When no context, prompt has no BUSINESS CONTEXT section."""
         from forja.planner import _generate_prd_from_idea
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("A todo app", context="")
         prompt_sent = mock_llm.call_args[0][0]
         assert "BUSINESS CONTEXT" not in prompt_sent
@@ -1222,7 +1224,7 @@ class TestAntiHallucination:
     def test_prd_system_msg_has_anti_hallucination(self):
         """System message in _generate_prd_from_idea includes anti-hallucination."""
         from forja.planner import _generate_prd_from_idea
-        with patch("forja.planner.call_llm", return_value=None) as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value=None) as mock_llm:
             _generate_prd_from_idea("Test app", skill="landing-page")
         system_sent = mock_llm.call_args[1].get("system", "")
         assert "anti-hallucination" in system_sent.lower()
@@ -1230,7 +1232,7 @@ class TestAntiHallucination:
     def test_enriched_prd_system_msg_has_anti_hallucination(self):
         """Enriched PRD system message includes anti-hallucination."""
         from forja.planner import _generate_enriched_prd
-        with patch("forja.planner.call_llm", return_value="# PRD") as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value="# PRD") as mock_llm:
             _generate_enriched_prd("# PRD", [], [])
         system_sent = mock_llm.call_args[1].get("system", "")
         assert "do not add" in system_sent.lower() or "do not invent" in system_sent.lower()
@@ -1238,7 +1240,7 @@ class TestAntiHallucination:
     def test_enriched_prd_user_prompt_has_anti_hallucination(self):
         """Enriched PRD user prompt includes do-not-invent instruction."""
         from forja.planner import _generate_enriched_prd
-        with patch("forja.planner.call_llm", return_value="# PRD") as mock_llm:
+        with patch("forja.planner._call_claude_code", return_value="# PRD") as mock_llm:
             _generate_enriched_prd("# PRD", [], [])
         prompt_sent = mock_llm.call_args[0][0]
         assert "do not add" in prompt_sent.lower() or "do not invent" in prompt_sent.lower()
@@ -1266,3 +1268,441 @@ class TestAntiHallucination:
         assert "metrics" in prompt
         assert "user counts" in prompt or "testimonials" in prompt
         assert "deployment commands" in prompt or "tool versions" in prompt
+
+
+# ── Cambio 5: Undo in _interactive_prd_edit ──────────────────────────
+
+class TestInteractivePrdEditUndo:
+    """Verify undo functionality in _interactive_prd_edit."""
+
+    def test_undo_after_edit(self):
+        """Choice '5' reverts to previous version after an edit."""
+        from forja.planner import _interactive_prd_edit
+        # Edit (2), provide feedback, undo (5), accept (1)
+        inputs = iter(["2", "Add security section", "5", "1"])
+        with patch("builtins.input", side_effect=inputs), \
+             patch("forja.planner._modify_prd_section",
+                   return_value="# PRD\n## Security\nNew stuff"):
+            result = _interactive_prd_edit("# PRD\nOriginal")
+        # After undo, should revert to original
+        assert result == "# PRD\nOriginal"
+
+    def test_undo_after_regenerate(self):
+        """Undo after choice '3' (regenerate) reverts to pre-regenerate text."""
+        from forja.planner import _interactive_prd_edit
+        inputs = iter(["3", "More concise", "5", "1"])
+        with patch("builtins.input", side_effect=inputs), \
+             patch("forja.planner._regenerate_prd_with_feedback",
+                   return_value="# Short PRD"):
+            result = _interactive_prd_edit("# Verbose PRD")
+        assert result == "# Verbose PRD"
+
+    def test_undo_not_shown_initially(self, capsys):
+        """Option 5 is NOT shown before any edit has been made."""
+        from forja.planner import _interactive_prd_edit
+        with patch("builtins.input", return_value="1"):
+            _interactive_prd_edit("# PRD")
+        output = capsys.readouterr().out
+        assert "(5)" not in output
+
+    def test_undo_shown_after_edit(self, capsys):
+        """Option 5 IS shown after an edit has been made."""
+        from forja.planner import _interactive_prd_edit
+        inputs = iter(["2", "Change title", "1"])
+        with patch("builtins.input", side_effect=inputs), \
+             patch("forja.planner._modify_prd_section",
+                   return_value="# Changed"):
+            _interactive_prd_edit("# Original")
+        output = capsys.readouterr().out
+        assert "(5)" in output
+
+    def test_undo_only_one_level(self):
+        """Undo reverts one level; second undo is not available."""
+        from forja.planner import _interactive_prd_edit
+        # Edit, edit again, undo → get second edit's input, not original
+        inputs = iter(["2", "First change", "2", "Second change", "5", "1"])
+        call_count = [0]
+        def mock_modify(prd, feedback):
+            call_count[0] += 1
+            return f"# Version {call_count[0]}"
+
+        with patch("builtins.input", side_effect=inputs), \
+             patch("forja.planner._modify_prd_section", side_effect=mock_modify):
+            result = _interactive_prd_edit("# Original")
+        # After undo of "Version 2", we should have "Version 1"
+        assert result == "# Version 1"
+
+
+# ── Cambio 2: Panel scope ────────────────────────────────────────────
+
+class TestAskPanelScope:
+    """Verify _ask_panel_scope returns correct mode."""
+
+    def test_default_is_full(self):
+        from forja.planner import _ask_panel_scope
+        with patch("builtins.input", return_value=""):
+            assert _ask_panel_scope("WHAT", 6) == "full"
+
+    def test_choice_1_is_full(self):
+        from forja.planner import _ask_panel_scope
+        with patch("builtins.input", return_value="1"):
+            assert _ask_panel_scope("WHAT", 6) == "full"
+
+    def test_choice_2_is_quick(self):
+        from forja.planner import _ask_panel_scope
+        with patch("builtins.input", return_value="2"):
+            assert _ask_panel_scope("HOW", 7) == "quick"
+
+    def test_choice_3_is_skip(self):
+        from forja.planner import _ask_panel_scope
+        with patch("builtins.input", return_value="3"):
+            assert _ask_panel_scope("WHAT", 6) == "skip"
+
+    def test_eof_returns_full(self):
+        from forja.planner import _ask_panel_scope
+        with patch("builtins.input", side_effect=EOFError):
+            assert _ask_panel_scope("WHAT", 6) == "full"
+
+
+# ── Cambio 7: Custom guidance inference ──────────────────────────────
+
+class TestInferCustomGuidance:
+    """Verify _infer_custom_guidance returns hints based on PRD keywords."""
+
+    def test_game_keyword(self):
+        from forja.planner import _infer_custom_guidance
+        result = _infer_custom_guidance("Build a 2D platformer game with pixel art")
+        assert "game mechanics" in result.lower()
+
+    def test_cli_keyword(self):
+        from forja.planner import _infer_custom_guidance
+        result = _infer_custom_guidance("Build a CLI tool for file conversion")
+        assert "command structure" in result.lower()
+
+    def test_multiple_keywords(self):
+        from forja.planner import _infer_custom_guidance
+        result = _infer_custom_guidance("A dashboard with a data pipeline backend")
+        assert "data visualization" in result.lower()
+        assert "data flow" in result.lower()
+
+    def test_no_match_returns_empty(self):
+        from forja.planner import _infer_custom_guidance
+        result = _infer_custom_guidance("A simple todo app with React")
+        assert result == ""
+
+    def test_case_insensitive(self):
+        from forja.planner import _infer_custom_guidance
+        result = _infer_custom_guidance("Build a GAME for mobile")
+        assert "game mechanics" in result.lower()
+
+
+# ── Cambio 4: Missing context warning ────────────────────────────────
+
+class TestCheckMissingContext:
+    """Verify _check_missing_context warns when context is missing."""
+
+    def test_warns_when_no_company_dir(self, tmp_path, monkeypatch, capsys):
+        from forja.planner import _check_missing_context
+        # Point CONTEXT_DIR to empty tmp_path
+        monkeypatch.setattr("forja.planner.CONTEXT_DIR", tmp_path / "context")
+        _check_missing_context()
+        output = capsys.readouterr().out
+        assert "company context" in output
+        assert "forja init" in output
+
+    def test_warns_when_no_domains(self, tmp_path, monkeypatch, capsys):
+        from forja.planner import _check_missing_context
+        ctx = tmp_path / "context"
+        (ctx / "company").mkdir(parents=True)
+        monkeypatch.setattr("forja.planner.CONTEXT_DIR", ctx)
+        _check_missing_context()
+        output = capsys.readouterr().out
+        assert "domain" in output
+
+    def test_no_warning_when_context_exists(self, tmp_path, monkeypatch, capsys):
+        from forja.planner import _check_missing_context
+        ctx = tmp_path / "context"
+        (ctx / "company").mkdir(parents=True)
+        domains = ctx / "domains"
+        domains.mkdir(parents=True)
+        (domains / "devs.md").write_text("# Developers", encoding="utf-8")
+        monkeypatch.setattr("forja.planner.CONTEXT_DIR", ctx)
+        _check_missing_context()
+        output = capsys.readouterr().out
+        assert "Missing" not in output
+
+
+# ── Cambio 1: Research hint on every question ────────────────────────
+
+class TestResearchHintPerQuestion:
+    """Verify the research hint appears in _ask_question output."""
+
+    def test_hint_shown_per_question(self, capsys):
+        from forja.planner import _ask_question
+        q = {
+            "expert_name": "Architect",
+            "id": 1,
+            "question": "What framework?",
+            "why": "Affects all decisions",
+            "default": "React",
+        }
+        experts = [{"name": "Architect", "field": "System Design"}]
+        with patch("builtins.input", return_value=""):
+            _ask_question(q, experts, "summary", total=3)
+        output = capsys.readouterr().out
+        assert "research" in output.lower()
+        assert "skip" in output.lower()
+        assert "done" in output.lower()
+
+
+# ── New tests for 7 fixes ─────────────────────────────────────────────
+
+
+class TestDesignExpertQuestions:
+    """Verify _ensure_design_expert injects 3 design questions."""
+
+    def test_design_expert_adds_questions(self):
+        """UI project gets 3 design questions appended."""
+        from forja.planner import _ensure_design_expert, DESIGN_QUESTIONS
+        experts = [
+            {"name": "Software Architect", "field": "Backend Architecture"},
+            {"name": "PM", "field": "Product Strategy"},
+        ]
+        questions = [{"id": 1, "expert_name": "PM", "question": "q?", "default": "d"}]
+        prd = "Build a React dashboard with real-time updates."
+        new_experts, new_questions = _ensure_design_expert(experts, questions, prd)
+        design_qs = [q for q in new_questions if q.get("expert_name") == "Design Systems Expert"]
+        assert len(design_qs) == len(DESIGN_QUESTIONS)
+        assert design_qs[0]["id"] == 2  # continues from max existing id
+        assert design_qs[1]["id"] == 3
+        assert design_qs[2]["id"] == 4
+
+    def test_design_expert_no_questions_for_non_ui(self):
+        """Non-UI project: no design questions added."""
+        from forja.planner import _ensure_design_expert
+        experts = [{"name": "Architect", "field": "System Design"}]
+        questions = [{"id": 1, "expert_name": "Arch", "question": "q?", "default": "d"}]
+        prd = "Build a REST API for data processing."
+        _, new_questions = _ensure_design_expert(experts, questions, prd)
+        assert len(new_questions) == 1  # unchanged
+
+
+class TestResearchTruncation:
+    """Verify research findings are truncated at 1500 chars."""
+
+    def test_research_truncation_1500(self):
+        """Findings > 1500 chars get truncated with '...' suffix."""
+        from forja.planner import _generate_enriched_prd
+        long_findings = "x" * 2000
+        research = [{"topic": "big-topic", "findings": long_findings}]
+        with patch("forja.planner._call_claude_code", return_value="# PRD") as mock:
+            _generate_enriched_prd("# PRD", [], [], "", research)
+        prompt = mock.call_args[0][0]
+        # Should contain truncated findings (1500 chars + "...")
+        assert "x" * 1500 in prompt
+        assert "x" * 1501 not in prompt
+        assert "..." in prompt
+
+    def test_short_research_no_ellipsis(self):
+        """Findings <= 1500 chars are NOT truncated."""
+        from forja.planner import _generate_enriched_prd
+        short_findings = "x" * 500
+        research = [{"topic": "small-topic", "findings": short_findings}]
+        with patch("forja.planner._call_claude_code", return_value="# PRD") as mock:
+            _generate_enriched_prd("# PRD", [], [], "", research)
+        prompt = mock.call_args[0][0]
+        assert "x" * 500 in prompt
+        # No trailing "..." after findings
+        assert f"{'x' * 500}..." not in prompt
+
+
+class TestTagNames:
+    """Verify tag semantics: Enter→ACCEPTED, skip→SKIPPED."""
+
+    def test_enter_returns_accepted(self):
+        """Pressing Enter returns tag 'ACCEPTED'."""
+        from forja.planner import _ask_question
+        q = {"expert_name": "PM", "id": 1, "question": "Q?", "why": "W", "default": "D"}
+        experts = [{"name": "PM", "field": "Product"}]
+        with patch("builtins.input", return_value=""):
+            _, tag = _ask_question(q, experts, "summary", total=1)
+        assert tag == "ACCEPTED"
+
+    def test_skip_returns_skipped(self):
+        """Typing 'skip' returns tag 'SKIPPED'."""
+        from forja.planner import _ask_question
+        q = {"expert_name": "PM", "id": 1, "question": "Q?", "why": "W", "default": "D"}
+        experts = [{"name": "PM", "field": "Product"}]
+        with patch("builtins.input", return_value="skip"):
+            _, tag = _ask_question(q, experts, "summary", total=1)
+        assert tag == "SKIPPED"
+
+    def test_custom_answer_returns_fact(self):
+        """Typing a custom answer returns tag 'FACT'."""
+        from forja.planner import _ask_question
+        q = {"expert_name": "PM", "id": 1, "question": "Q?", "why": "W", "default": "D"}
+        experts = [{"name": "PM", "field": "Product"}]
+        with patch("builtins.input", return_value="my answer"):
+            _, tag = _ask_question(q, experts, "summary", total=1)
+        assert tag == "FACT"
+
+    def test_done_returns_done(self):
+        """Typing 'done' returns tag 'DONE'."""
+        from forja.planner import _ask_question
+        q = {"expert_name": "PM", "id": 1, "question": "Q?", "why": "W", "default": "D"}
+        experts = [{"name": "PM", "field": "Product"}]
+        with patch("builtins.input", return_value="done"):
+            _, tag = _ask_question(q, experts, "summary", total=1)
+        assert tag == "DONE"
+
+    def test_eof_returns_skipped(self):
+        """EOFError returns tag 'SKIPPED'."""
+        from forja.planner import _ask_question
+        q = {"expert_name": "PM", "id": 1, "question": "Q?", "why": "W", "default": "D"}
+        experts = [{"name": "PM", "field": "Product"}]
+        with patch("builtins.input", side_effect=EOFError):
+            _, tag = _ask_question(q, experts, "summary", total=1)
+        assert tag == "SKIPPED"
+
+    def test_auto_mode_returns_accepted(self):
+        """Auto mode returns tag 'ACCEPTED'."""
+        from forja.planner import _ask_question
+        q = {"expert_name": "PM", "id": 1, "question": "Q?", "why": "W", "default": "D"}
+        experts = [{"name": "PM", "field": "Product"}]
+        _, tag = _ask_question(q, experts, "summary", total=1, auto_mode=True)
+        assert tag == "ACCEPTED"
+
+
+class TestDeduplicateExperts:
+    """Verify _deduplicate_experts removes duplicates by name and field."""
+
+    def test_removes_duplicate_names(self):
+        from forja.planner import _deduplicate_experts
+        experts = [
+            {"name": "Alice", "field": "Security"},
+            {"name": "Bob", "field": "Backend"},
+            {"name": "Alice", "field": "Frontend"},
+        ]
+        result = _deduplicate_experts(experts)
+        assert len(result) == 2
+        assert result[0]["name"] == "Alice"
+        assert result[0]["field"] == "Security"  # first occurrence kept
+
+    def test_removes_duplicate_fields(self):
+        from forja.planner import _deduplicate_experts
+        experts = [
+            {"name": "Alice", "field": "Security"},
+            {"name": "Bob", "field": "Security"},
+            {"name": "Carol", "field": "Design"},
+        ]
+        result = _deduplicate_experts(experts)
+        assert len(result) == 2
+        names = [e["name"] for e in result]
+        assert "Alice" in names
+        assert "Carol" in names
+
+    def test_no_duplicates_unchanged(self):
+        from forja.planner import _deduplicate_experts
+        experts = [
+            {"name": "Alice", "field": "Security"},
+            {"name": "Bob", "field": "Backend"},
+            {"name": "Carol", "field": "Design"},
+        ]
+        result = _deduplicate_experts(experts)
+        assert len(result) == 3
+
+    def test_case_insensitive(self):
+        from forja.planner import _deduplicate_experts
+        experts = [
+            {"name": "Alice", "field": "Security"},
+            {"name": "alice", "field": "Frontend"},
+        ]
+        result = _deduplicate_experts(experts)
+        assert len(result) == 1
+
+
+class TestTranscriptArchivesPrevious:
+    """Verify _save_transcript archives old transcript before writing new one."""
+
+    def test_archives_existing_transcript(self, tmp_path, monkeypatch):
+        from forja.planner import _save_transcript
+        forja_dir = tmp_path / ".forja"
+        monkeypatch.setattr("forja.planner.FORJA_DIR", forja_dir)
+
+        # First save
+        _save_transcript([], "# PRD v1")
+        assert (forja_dir / "plan-transcript.json").exists()
+
+        # Second save — should archive the first
+        _save_transcript([], "# PRD v2")
+        transcript_files = list(forja_dir.glob("plan-transcript*.json"))
+        assert len(transcript_files) == 2
+        # One is the current, one is the archive
+        archived = [f for f in transcript_files if "T" in f.stem]
+        assert len(archived) == 1
+
+    def test_no_archive_on_first_run(self, tmp_path, monkeypatch):
+        from forja.planner import _save_transcript
+        forja_dir = tmp_path / ".forja"
+        monkeypatch.setattr("forja.planner.FORJA_DIR", forja_dir)
+
+        _save_transcript([], "# PRD v1")
+        transcript_files = list(forja_dir.glob("plan-transcript*.json"))
+        assert len(transcript_files) == 1
+        assert transcript_files[0].name == "plan-transcript.json"
+
+
+class TestTranscriptIncludesPrdContent:
+    """Verify enriched_prd field is saved in transcript."""
+
+    def test_transcript_includes_prd_content(self, tmp_path, monkeypatch):
+        from forja.planner import _save_transcript
+        monkeypatch.setattr("forja.planner.FORJA_DIR", tmp_path / ".forja")
+
+        prd = "# My Enriched PRD\n\nFull content here."
+        path = _save_transcript([], prd)
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert "enriched_prd" in data
+        assert data["enriched_prd"] == prd
+        assert data["enriched_prd_length"] == len(prd)
+
+    def test_transcript_empty_prd(self, tmp_path, monkeypatch):
+        from forja.planner import _save_transcript
+        monkeypatch.setattr("forja.planner.FORJA_DIR", tmp_path / ".forja")
+
+        path = _save_transcript([], None)
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["enriched_prd"] == ""
+        assert data["enriched_prd_length"] == 0
+
+
+class TestSpecificExceptions:
+    """Verify generic except Exception blocks have been replaced."""
+
+    def test_detect_skill_catches_json_errors(self, tmp_path, monkeypatch):
+        """_detect_skill handles corrupt JSON without catching all exceptions."""
+        from forja.planner import _detect_skill
+        monkeypatch.chdir(tmp_path)
+        tools_dir = tmp_path / ".forja-tools"
+        tools_dir.mkdir(parents=True)
+        (tools_dir / "skill.json").write_text("{invalid json")
+        # Should not raise, should return "custom"
+        assert _detect_skill() == "custom"
+
+    def test_generate_prd_handles_llm_runtime_error(self):
+        """_generate_prd_from_idea handles RuntimeError from LLM."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner._call_claude_code", side_effect=RuntimeError("LLM down")):
+            prd, title = _generate_prd_from_idea("Test app")
+        assert prd is None
+        assert title is None
+
+    def test_generate_prd_handles_timeout_error(self):
+        """_generate_prd_from_idea handles TimeoutError from LLM."""
+        from forja.planner import _generate_prd_from_idea
+        with patch("forja.planner._call_claude_code", side_effect=TimeoutError("Timed out")):
+            prd, title = _generate_prd_from_idea("Test app")
+        assert prd is None
+        assert title is None
