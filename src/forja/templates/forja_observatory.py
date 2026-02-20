@@ -594,10 +594,11 @@ def _compute_metrics(teammates, spec_review, plan_transcript,
 
 # ── Report persistence ───────────────────────────────────────────────
 
-def _save_run(metrics):
-    """Save metrics snapshot (strip heavy fields)."""
+def _save_run(metrics, ts=None):
+    """Save metrics snapshot (strip heavy fields). Returns (path, ts_string)."""
     OBSERVATORY_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if ts is None:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_path = OBSERVATORY_DIR / f"run-{ts}.json"
     skip_keys = {"crossmodel_issues", "commits", "plan_answers",
                  "plan_experts", "plan_questions", "learnings_by_cat",
@@ -606,7 +607,7 @@ def _save_run(metrics):
     payload = {"timestamp": datetime.now(timezone.utc).isoformat(), "metrics": save_metrics}
     run_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
                         encoding="utf-8")
-    return run_path
+    return run_path, ts
 
 
 def _load_all_runs():
@@ -618,6 +619,134 @@ def _load_all_runs():
         except (json.JSONDecodeError, OSError) as exc:
             print(f"  could not load run file {fpath}: {exc}", file=sys.stderr)
     return runs
+
+
+# ── Multi-run dashboard helpers ─────────────────────────────────────
+
+
+def _ts_to_filename(iso_ts):
+    """Convert ISO timestamp to YYYYMMDD-HHMMSS format for filenames."""
+    if not iso_ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        return dt.strftime("%Y%m%d-%H%M%S")
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _prepare_index_data(all_runs):
+    """Compute accumulated metrics across all runs for the index dashboard."""
+    total_runs = len(all_runs)
+    if total_runs == 0:
+        return {"total_runs": 0, "runs": []}
+
+    runs_data = []
+    total_features_shipped = 0
+    all_passed_runs = 0
+    total_build_minutes = 0
+    best_coverage = 0
+
+    features_per_run = []
+    coverage_trend = []
+    cycles_trend = []
+    learnings_high_trend = []
+
+    for i, run in enumerate(all_runs):
+        m = run.get("metrics", {})
+        ts = run.get("timestamp", "")
+        ts_file = _ts_to_filename(ts)
+
+        passed = m.get("total_passed", 0)
+        total_feat = m.get("total_features", 0)
+        blocked = m.get("total_blocked", 0)
+        failed = m.get("total_failed", 0)
+        coverage = m.get("outcome_tech_coverage", m.get("outcome_coverage", 0))
+        avg_cyc = m.get("avg_cycles", 0)
+        time_min = m.get("total_time_minutes", 0)
+        l_high = m.get("learnings_high", 0)
+        l_total = m.get("learnings_total", 0)
+        build_status = m.get("build_status", "skip")
+
+        total_features_shipped += passed
+        if total_feat > 0 and passed == total_feat:
+            all_passed_runs += 1
+        total_build_minutes += time_min
+        best_coverage = max(best_coverage, coverage)
+
+        features_per_run.append(passed)
+        coverage_trend.append(coverage)
+        cycles_trend.append(avg_cyc)
+        learnings_high_trend.append(l_high)
+
+        # Compute deltas vs previous run
+        delta_passed = None
+        delta_coverage = None
+        delta_cycles = None
+        if i > 0:
+            prev_m = all_runs[i - 1].get("metrics", {})
+            delta_passed = passed - prev_m.get("total_passed", 0)
+            delta_coverage = round(coverage - prev_m.get(
+                "outcome_tech_coverage", prev_m.get("outcome_coverage", 0)), 1)
+            delta_cycles = round(avg_cyc - prev_m.get("avg_cycles", 0), 1)
+
+        runs_data.append({
+            "index": i + 1,
+            "timestamp": ts,
+            "filename": f"run-{ts_file}.html" if ts_file else "",
+            "build_status": build_status,
+            "total_features": total_feat,
+            "total_passed": passed,
+            "total_blocked": blocked,
+            "total_failed": failed,
+            "outcome_tech_coverage": coverage,
+            "avg_cycles": avg_cyc,
+            "total_time_minutes": time_min,
+            "learnings_high": l_high,
+            "learnings_total": l_total,
+            "num_teammates": m.get("num_teammates", 0),
+            "delta_passed": delta_passed,
+            "delta_coverage": delta_coverage,
+            "delta_cycles": delta_cycles,
+        })
+
+    return {
+        "total_runs": total_runs,
+        "total_features_shipped": total_features_shipped,
+        "overall_success_rate": round(all_passed_runs / total_runs * 100, 1) if total_runs > 0 else 0,
+        "avg_build_time_minutes": round(total_build_minutes / total_runs) if total_runs > 0 else 0,
+        "best_coverage": best_coverage,
+        "total_learnings": sum(r.get("metrics", {}).get("learnings_total", 0) for r in all_runs),
+        "runs": runs_data,
+        "features_per_run": features_per_run,
+        "coverage_trend": coverage_trend,
+        "cycles_trend": cycles_trend,
+        "learnings_high_trend": learnings_high_trend,
+        "latest_run_index": total_runs - 1,
+    }
+
+
+def _build_run_navigation(all_runs, current_index):
+    """Build previous/next run navigation for a per-run detail page."""
+    nav = {"current_index": current_index + 1}  # 1-based display
+
+    if current_index > 0:
+        prev_ts = _ts_to_filename(all_runs[current_index - 1].get("timestamp", ""))
+        nav["prev_file"] = f"run-{prev_ts}.html" if prev_ts else None
+        nav["prev_index"] = current_index  # 1-based
+    else:
+        nav["prev_file"] = None
+        nav["prev_index"] = None
+
+    if current_index < len(all_runs) - 1:
+        next_ts = _ts_to_filename(all_runs[current_index + 1].get("timestamp", ""))
+        nav["next_file"] = f"run-{next_ts}.html" if next_ts else None
+        nav["next_index"] = current_index + 2  # 1-based
+    else:
+        nav["next_file"] = None
+        nav["next_index"] = None
+
+    return nav
 
 
 # ── HTML helpers ─────────────────────────────────────────────────────
@@ -646,7 +775,43 @@ def _load_html_template():
     )
 
 
-def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=0):
+def _load_index_template():
+    """Load observatory_index_template.html for the multi-run dashboard."""
+    here = Path(__file__).parent / "observatory_index_template.html"
+    if here.exists():
+        return here.read_text(encoding="utf-8")
+    tools = Path(".forja-tools") / "observatory_index_template.html"
+    if tools.exists():
+        return tools.read_text(encoding="utf-8")
+    raise FileNotFoundError(
+        "observatory_index_template.html not found. Run 'forja init --upgrade' to fix."
+    )
+
+
+def _generate_index_html(all_runs):
+    """Generate the multi-run index dashboard HTML."""
+    template = _load_index_template()
+    index_data = _prepare_index_data(all_runs)
+    data_json = json.dumps(index_data, ensure_ascii=False)
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    html = template.replace("/*DATA_JSON*/null", data_json)
+    html = html.replace("<!--GENERATED_AT-->", generated_at)
+
+    # Same script-safety escaping as _generate_html
+    try:
+        idx1 = html.index("<script>", html.index("chart.js"))
+        idx2 = html.index("</script>", idx1)
+        script_body = html[idx1 + 8:idx2]
+        safe_body = script_body.replace("</", "<\\/")
+        html = html[:idx1 + 8] + safe_body + html[idx2:]
+    except ValueError:
+        pass  # No chart.js reference or script block not found
+    return html
+
+
+def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=0,
+                            run_navigation=None):
     """Build the JSON-serializable dict embedded into the HTML template."""
     m = metrics
     return {
@@ -704,14 +869,18 @@ def _prepare_dashboard_data(metrics, all_runs, live_mode=False, elapsed_seconds=
         "event_stream": m.get("event_stream", [])[:300],
         # How to Run
         **_detect_project_run_info(),
+        # Run navigation (prev/next for per-run pages)
+        "run_navigation": run_navigation,
     }
 
 
-def _generate_html(metrics, all_runs, live_mode=False, elapsed_seconds=0):
+def _generate_html(metrics, all_runs, live_mode=False, elapsed_seconds=0,
+                    run_navigation=None):
     """Generate full pipeline dashboard HTML from external template."""
     template = _load_html_template()
 
-    dashboard_data = _prepare_dashboard_data(metrics, all_runs, live_mode, elapsed_seconds)
+    dashboard_data = _prepare_dashboard_data(metrics, all_runs, live_mode, elapsed_seconds,
+                                             run_navigation=run_navigation)
     data_json = json.dumps(dashboard_data, ensure_ascii=False)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -783,26 +952,52 @@ def cmd_report():
         event_stream=event_stream,
     )
 
-    run_path = _save_run(metrics)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    run_path, ts = _save_run(metrics, ts=ts)
     print(f"{PASS} Metrics saved to {run_path}")
 
     all_runs = _load_all_runs()
-
     OBSERVATORY_DIR.mkdir(parents=True, exist_ok=True)
-    html_path = OBSERVATORY_DIR / "evals.html"
-    html_content = _generate_html(metrics, all_runs)
-    html_path.write_text(html_content, encoding="utf-8")
-    print(f"{PASS} Dashboard: {html_path}")
 
-    _print_summary(metrics, html_path)
+    # Determine current run index (the one we just saved is the last)
+    current_run_index = len(all_runs) - 1
 
+    # Build run navigation for the current run
+    run_nav = _build_run_navigation(all_runs, current_run_index)
+
+    # Generate per-run HTML with navigation
+    run_html_path = OBSERVATORY_DIR / f"run-{ts}.html"
+    run_html_content = _generate_html(metrics, all_runs, run_navigation=run_nav)
+    run_html_path.write_text(run_html_content, encoding="utf-8")
+
+    # Backward compat: evals.html = copy of latest run
+    evals_path = OBSERVATORY_DIR / "evals.html"
+    evals_path.write_text(run_html_content, encoding="utf-8")
+    print(f"{PASS} Dashboard: {evals_path}")
+
+    # Generate index.html (multi-run dashboard)
+    index_path = None
     try:
-        if platform.system() == "Darwin":
-            subprocess.run(["open", str(html_path)], timeout=5)
-        elif platform.system() == "Linux":
-            subprocess.run(["xdg-open", str(html_path)], timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        print(f"  could not open browser: {exc}", file=sys.stderr)
+        index_html = _generate_index_html(all_runs)
+        index_path = OBSERVATORY_DIR / "index.html"
+        index_path.write_text(index_html, encoding="utf-8")
+        print(f"{PASS} Index: {index_path}")
+    except FileNotFoundError:
+        pass  # Template not available (old install) — skip gracefully
+
+    _print_summary(metrics, evals_path)
+
+    # Auto-open: prefer index when multiple runs, else evals
+    no_open = "--no-open" in sys.argv
+    if not no_open:
+        open_path = index_path if index_path and index_path.exists() and len(all_runs) > 1 else evals_path
+        try:
+            if platform.system() == "Darwin":
+                subprocess.run(["open", str(open_path)], timeout=5)
+            elif platform.system() == "Linux":
+                subprocess.run(["xdg-open", str(open_path)], timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            print(f"  could not open browser: {exc}", file=sys.stderr)
 
     return True
 
@@ -933,6 +1128,12 @@ def cmd_live():
         all_runs = _load_all_runs()
         html_content = _generate_html(metrics, all_runs, live_mode=False)
         html_path.write_text(html_content, encoding="utf-8")
+        # Also update index.html with latest data
+        try:
+            index_html = _generate_index_html(all_runs)
+            (OBSERVATORY_DIR / "index.html").write_text(index_html, encoding="utf-8")
+        except (FileNotFoundError, Exception):
+            pass  # Non-critical
     except Exception as e:
         print(f"  writing final dashboard: {e}", file=sys.stderr)
 
@@ -947,7 +1148,7 @@ def cmd_live():
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ("report", "live"):
-        print("Usage: python3 .forja-tools/forja_observatory.py report|live")
+        print("Usage: python3 .forja-tools/forja_observatory.py report|live [--no-open]")
         sys.exit(1)
     if sys.argv[1] == "live":
         success = cmd_live()

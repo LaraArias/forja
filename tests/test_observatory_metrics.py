@@ -24,7 +24,10 @@ from forja.templates.forja_utils import Feature
 _shim.Feature = Feature
 sys.modules.setdefault("forja_utils", _shim)
 
-from forja.templates.forja_observatory import _compute_metrics, _esc
+from forja.templates.forja_observatory import (
+    _compute_metrics, _esc, _ts_to_filename, _prepare_index_data,
+    _build_run_navigation,
+)
 
 
 # ── _compute_metrics tests ───────────────────────────────────────────
@@ -412,3 +415,199 @@ class TestEsc:
     def test_non_string_input(self):
         assert _esc(42) == "42"
         assert _esc(None) == "None"
+
+
+# ── _ts_to_filename tests ───────────────────────────────────────────
+
+class TestTsToFilename:
+    """ISO timestamp to filename format conversion."""
+
+    def test_iso_with_offset(self):
+        assert _ts_to_filename("2025-05-01T10:30:45+00:00") == "20250501-103045"
+
+    def test_iso_with_z(self):
+        assert _ts_to_filename("2025-05-01T10:30:45Z") == "20250501-103045"
+
+    def test_iso_with_microseconds(self):
+        result = _ts_to_filename("2025-05-01T10:30:45.123456+00:00")
+        assert result == "20250501-103045"
+
+    def test_empty_string(self):
+        assert _ts_to_filename("") == ""
+
+    def test_none(self):
+        assert _ts_to_filename(None) == ""
+
+    def test_invalid_format(self):
+        assert _ts_to_filename("not-a-date") == ""
+
+
+# ── _prepare_index_data tests ───────────────────────────────────────
+
+class TestPrepareIndexDataEmpty:
+    """Index data with no runs."""
+
+    def test_no_runs(self):
+        data = _prepare_index_data([])
+        assert data["total_runs"] == 0
+        assert data["runs"] == []
+
+
+class TestPrepareIndexDataSingleRun:
+    """Index data with a single run."""
+
+    def test_single_run_kpis(self):
+        runs = [{
+            "timestamp": "2025-05-01T10:30:45+00:00",
+            "metrics": {
+                "total_passed": 5, "total_features": 5,
+                "total_blocked": 0, "total_failed": 0,
+                "outcome_tech_coverage": 85, "avg_cycles": 1.5,
+                "total_time_minutes": 30, "learnings_high": 2,
+                "learnings_total": 8, "build_status": "pass",
+                "num_teammates": 2,
+            }
+        }]
+        data = _prepare_index_data(runs)
+        assert data["total_runs"] == 1
+        assert data["total_features_shipped"] == 5
+        assert data["overall_success_rate"] == 100.0
+        assert data["best_coverage"] == 85
+        assert data["avg_build_time_minutes"] == 30
+        assert data["total_learnings"] == 8
+
+    def test_single_run_no_deltas(self):
+        runs = [{
+            "timestamp": "2025-05-01T10:30:45+00:00",
+            "metrics": {"total_passed": 3, "total_features": 5,
+                        "outcome_tech_coverage": 60, "avg_cycles": 2.0,
+                        "total_time_minutes": 40, "build_status": "warn",
+                        "learnings_high": 1, "learnings_total": 3,
+                        "total_blocked": 0, "total_failed": 2}
+        }]
+        data = _prepare_index_data(runs)
+        assert data["runs"][0]["delta_passed"] is None
+        assert data["runs"][0]["delta_coverage"] is None
+        assert data["runs"][0]["delta_cycles"] is None
+
+    def test_single_run_trends(self):
+        runs = [{
+            "timestamp": "2025-05-01T10:30:45+00:00",
+            "metrics": {"total_passed": 5, "total_features": 5,
+                        "outcome_tech_coverage": 85, "avg_cycles": 1.5,
+                        "total_time_minutes": 30, "build_status": "pass",
+                        "learnings_high": 2, "learnings_total": 8}
+        }]
+        data = _prepare_index_data(runs)
+        assert data["features_per_run"] == [5]
+        assert data["coverage_trend"] == [85]
+        assert data["cycles_trend"] == [1.5]
+        assert data["learnings_high_trend"] == [2]
+
+
+class TestPrepareIndexDataMultiRun:
+    """Index data with multiple runs."""
+
+    def _make_runs(self):
+        return [
+            {"timestamp": "2025-05-01T10:00:00+00:00",
+             "metrics": {"total_passed": 3, "total_features": 5,
+                         "outcome_tech_coverage": 60, "avg_cycles": 2.0,
+                         "total_time_minutes": 40, "build_status": "warn",
+                         "learnings_high": 3, "learnings_total": 5,
+                         "total_blocked": 0, "total_failed": 2,
+                         "num_teammates": 2}},
+            {"timestamp": "2025-05-02T10:00:00+00:00",
+             "metrics": {"total_passed": 5, "total_features": 5,
+                         "outcome_tech_coverage": 90, "avg_cycles": 1.2,
+                         "total_time_minutes": 25, "build_status": "pass",
+                         "learnings_high": 1, "learnings_total": 3,
+                         "total_blocked": 0, "total_failed": 0,
+                         "num_teammates": 2}},
+        ]
+
+    def test_accumulated_features(self):
+        data = _prepare_index_data(self._make_runs())
+        assert data["total_features_shipped"] == 8  # 3 + 5
+
+    def test_success_rate(self):
+        data = _prepare_index_data(self._make_runs())
+        assert data["overall_success_rate"] == 50.0  # 1 of 2 runs all-passed
+
+    def test_best_coverage(self):
+        data = _prepare_index_data(self._make_runs())
+        assert data["best_coverage"] == 90
+
+    def test_avg_build_time(self):
+        data = _prepare_index_data(self._make_runs())
+        assert data["avg_build_time_minutes"] == 32  # (40+25)/2 rounded
+
+    def test_deltas_computed(self):
+        data = _prepare_index_data(self._make_runs())
+        r2 = data["runs"][1]
+        assert r2["delta_passed"] == 2   # 5 - 3
+        assert r2["delta_coverage"] == 30.0  # 90 - 60
+        assert r2["delta_cycles"] == -0.8  # 1.2 - 2.0
+
+    def test_trends(self):
+        data = _prepare_index_data(self._make_runs())
+        assert data["features_per_run"] == [3, 5]
+        assert data["coverage_trend"] == [60, 90]
+        assert data["cycles_trend"] == [2.0, 1.2]
+        assert data["learnings_high_trend"] == [3, 1]
+
+    def test_run_filenames(self):
+        data = _prepare_index_data(self._make_runs())
+        assert data["runs"][0]["filename"] == "run-20250501-100000.html"
+        assert data["runs"][1]["filename"] == "run-20250502-100000.html"
+
+    def test_run_indices_1based(self):
+        data = _prepare_index_data(self._make_runs())
+        assert data["runs"][0]["index"] == 1
+        assert data["runs"][1]["index"] == 2
+
+
+# ── _build_run_navigation tests ─────────────────────────────────────
+
+class TestBuildRunNavigation:
+    """Run navigation (prev/next) for per-run detail pages."""
+
+    def _make_runs(self, n=3):
+        return [
+            {"timestamp": f"2025-05-0{i+1}T10:00:00+00:00", "metrics": {}}
+            for i in range(n)
+        ]
+
+    def test_first_run_no_prev(self):
+        runs = self._make_runs(3)
+        nav = _build_run_navigation(runs, 0)
+        assert nav["current_index"] == 1
+        assert nav["prev_file"] is None
+        assert nav["prev_index"] is None
+        assert nav["next_file"] is not None
+        assert nav["next_index"] == 2
+
+    def test_last_run_no_next(self):
+        runs = self._make_runs(3)
+        nav = _build_run_navigation(runs, 2)
+        assert nav["current_index"] == 3
+        assert nav["prev_file"] is not None
+        assert nav["prev_index"] == 2
+        assert nav["next_file"] is None
+        assert nav["next_index"] is None
+
+    def test_middle_run_has_both(self):
+        runs = self._make_runs(3)
+        nav = _build_run_navigation(runs, 1)
+        assert nav["current_index"] == 2
+        assert nav["prev_file"] is not None
+        assert nav["prev_index"] == 1
+        assert nav["next_file"] is not None
+        assert nav["next_index"] == 3
+
+    def test_single_run(self):
+        runs = self._make_runs(1)
+        nav = _build_run_navigation(runs, 0)
+        assert nav["current_index"] == 1
+        assert nav["prev_file"] is None
+        assert nav["next_file"] is None

@@ -39,6 +39,7 @@ TEMPLATES = [
     ("forja_hardening.py", ".forja-tools/forja_hardening.py"),
     ("forja_observatory.py", ".forja-tools/forja_observatory.py"),
     ("observatory_template.html", ".forja-tools/observatory_template.html"),
+    ("observatory_index_template.html", ".forja-tools/observatory_index_template.html"),
     ("forja_specreview.py", ".forja-tools/forja_specreview.py"),
     ("forja_outcome.py", ".forja-tools/forja_outcome.py"),
     ("forja_learnings.py", ".forja-tools/forja_learnings.py"),

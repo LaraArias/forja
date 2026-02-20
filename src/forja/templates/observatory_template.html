@@ -188,6 +188,15 @@ details.zone[open] > summary::before { content:'▾ '; }
 </head>
 <body>
 
+<nav id="run-nav" style="display:none;justify-content:space-between;align-items:center;
+  padding:10px 16px;margin-bottom:16px;background:var(--surface);
+  border:1px solid var(--border);border-radius:8px;font-size:.85rem;">
+  <a href="index.html" style="color:var(--accent);text-decoration:none;font-weight:600">
+    &larr; All Runs
+  </a>
+  <div id="run-nav-arrows" style="display:flex;align-items:center;gap:16px;"></div>
+</nav>
+
 <h1>Forja Observatory</h1>
 <p class="subtitle">Full pipeline metrics dashboard</p>
 
@@ -197,6 +206,24 @@ details.zone[open] > summary::before { content:'▾ '; }
 <script>
 const D = /*DATA_JSON*/null;
 const hasChartJS = typeof Chart !== 'undefined';
+
+// ── Run Navigation ──
+(function() {
+  const nav = document.getElementById('run-nav');
+  const arrows = document.getElementById('run-nav-arrows');
+  if (!nav || !D || !D.run_navigation) return;
+  const rn = D.run_navigation;
+  nav.style.display = 'flex';
+  let html = '';
+  if (rn.prev_file) {
+    html += '<a href="' + rn.prev_file + '" style="color:var(--dim);text-decoration:none">&larr; Run #' + rn.prev_index + '</a>';
+  }
+  html += '<span style="color:var(--text);font-weight:600">Run #' + rn.current_index + '</span>';
+  if (rn.next_file) {
+    html += '<a href="' + rn.next_file + '" style="color:var(--dim);text-decoration:none">Run #' + rn.next_index + ' &rarr;</a>';
+  }
+  arrows.innerHTML = html;
+})();
 
 // ── Helpers ──
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/>/g,'&gt;');

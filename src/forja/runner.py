@@ -2030,7 +2030,7 @@ def _run_observatory():
 
     try:
         result = subprocess.run(
-            [sys.executable, str(observatory_script), "report"],
+            [sys.executable, str(observatory_script), "report", "--no-open"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -2042,12 +2042,12 @@ def _run_observatory():
     # Show dashboard path
     output = result.stdout.strip()
     for line in output.splitlines():
-        if "evals.html" in line:
+        if "evals.html" in line or "index.html" in line or "Dashboard:" in line:
             print(f"  {line.strip()}")
-            return
 
     if result.returncode == 0:
-        print(f"  {DIM}report generated{RESET}")
+        if not any(k in output for k in ("evals.html", "index.html", "Dashboard:")):
+            print(f"  {DIM}report generated{RESET}")
     else:
         print(f"  {DIM}report generation failed (non-blocking){RESET}")
 
@@ -2521,9 +2521,13 @@ def _auto_open_output():
 
     from forja.planner import _detect_skill
 
-    # Always open observatory dashboard if it exists
+    # Prefer multi-run index dashboard when available, else latest run
+    observatory_index = FORJA_DIR / "observatory" / "index.html"
     observatory_html = FORJA_DIR / "observatory" / "evals.html"
-    if observatory_html.exists():
+    if observatory_index.exists():
+        webbrowser.open(f"file://{observatory_index.resolve()}")
+        print(f"\n  {GREEN}Observatory dashboard opened{RESET}")
+    elif observatory_html.exists():
         webbrowser.open(f"file://{observatory_html.resolve()}")
         print(f"\n  {GREEN}Observatory dashboard opened{RESET}")
 
